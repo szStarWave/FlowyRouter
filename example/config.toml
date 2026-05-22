@@ -1,0 +1,71 @@
+# Flowy Router — 示例配置
+# 复制到用户目录后编辑上游 base_url（api_key 均为选填）：
+#   Linux/macOS: cp example/config.toml ~/.flowy-router/config.toml
+#   Windows:     copy example\config.toml %USERPROFILE%\.flowy-router\config.toml
+#
+# 或使用自定义路径启动：
+#   flowy --config /path/to/config.toml gateway start
+
+# ---------------------------------------------------------------------------
+# Gateway：监听、路由策略、管理接口
+# ---------------------------------------------------------------------------
+[gateway]
+# 监听地址（OpenClaw / Hermes 的 baseUrl 须指向 http://<listen>/v1）
+listen = "127.0.0.1:8080"
+
+# 端/云/级联总开关（仅配置文件控制，不支持请求头覆盖）
+#   auto     — 按难度分 + default_profile + routing_mode 自动选择
+#   edge     — 全部走端侧（端不可用则降级 cloud）
+#   cloud    — 全部走云端
+#   cascade  — 全部走「先 edge 再可能升 cloud」
+route = "auto"
+
+# 仅当 route = "auto" 时生效：
+#   single   — d 低→edge，否则 cloud（不先试端再升云）
+#   cascade  — d 低→edge；中→先 edge 质量过关则返回，否则升 cloud；高→cloud
+#   split    — 当前实现等同一律 cloud
+routing_mode = "cascade"
+
+# auto 模式下的难度策略（影响 θ_edge / θ_cloud 阈值）
+#   economy | balanced | premium | privacy
+default_profile = "balanced"
+
+# 端侧上下文上限（token 估算），超过约 80% 会触发 GATE_CTX_OVERFLOW 走云
+ctx_edge_max_tokens = 65536
+
+# 可选：入站鉴权；配置后客户端须带 Authorization: Bearer 或 x-api-key
+# api_key = "flowy-local"
+
+# 可选：保护 POST /v1/admin/shutdown，请求头 X-Flowy-Admin-Token
+# admin_token = "change-me"
+
+# 经验系统（隐式学习 + 会话 cloud_sticky，持久化到 experience.json / sessions/）
+# experience_enabled = true
+# experience_learning_rate = 0.08
+# experience_max_bias = 0.12
+# cloud_sticky_ttl_secs = 600
+# session_persist_enabled = true
+
+# ---------------------------------------------------------------------------
+# 上游模型（OpenAI 兼容 Chat Completions）
+# ---------------------------------------------------------------------------
+[upstream.edge]
+# 端侧：Ollama / vLLM / LM Studio 等
+base_url = "http://127.0.0.1:11434/v1"
+# api_key = "ollama"   # 转发到端侧上游的 Bearer（Ollama 等需要时填写）
+
+[upstream.cloud]
+# 云端：DeepSeek / OpenAI / 其他兼容 API
+base_url = "https://api.deepseek.com/v1"
+# api_key = "sk-your-deepseek-api-key"   # 上游需要鉴权时填写（DeepSeek 等）
+
+# ---------------------------------------------------------------------------
+# CLI：管理命令如何找到 Gateway 与 flowy-gateway 二进制
+# ---------------------------------------------------------------------------
+[cli]
+# 默认同 http://{gateway.listen}，CLI 与 Gateway 不在同一机器时修改
+# gateway_url = "http://127.0.0.1:8080"
+
+# flowy gateway start 找不到二进制时设为绝对路径
+# gateway_bin = "/home/you/flowy-router/target/release/flowy-gateway"
+# Windows: gateway_bin = "C:\\path\\to\\flowy-gateway.exe"

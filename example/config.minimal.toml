@@ -1,0 +1,11 @@
+# 示例：最小配置（Gateway 可启动；聊天前须至少配置 [upstream.edge] 或 [upstream.cloud]）
+# 使用: flowy --config example/config.minimal.toml gateway start
+
+[gateway]
+listen = "127.0.0.1:8080"
+route = "auto"
+routing_mode = "cascade"
+default_profile = "balanced"
+ctx_edge_max_tokens = 65536
+
+[cli]

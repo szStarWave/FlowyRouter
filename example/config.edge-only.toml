@@ -1,0 +1,14 @@
+# 示例：全部走端侧（本地 Ollama），适合离线或省 Cloud 费用
+# 使用: flowy --config example/config.edge-only.toml gateway start
+
+[gateway]
+listen = "127.0.0.1:8080"
+route = "edge"
+routing_mode = "single"
+default_profile = "privacy"
+ctx_edge_max_tokens = 65536
+
+[upstream.edge]
+base_url = "http://127.0.0.1:11434/v1"
+
+[cli]
