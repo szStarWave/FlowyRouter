@@ -1,10 +1,19 @@
 use std::path::PathBuf;
 
 use crate::config::ConfigFile;
-use crate::config::{ensure_initialized, load_from_path};
+use crate::config::{ensure_initialized, load_from_path, setup::endpoint_configured};
 
 use crate::gateway::experience::ExperienceSettings;
 use crate::gateway::routing::{Profile, RouteTier, RoutingMode};
+
+#[derive(Debug, Clone)]
+pub struct AdaptiveRoutingSettings {
+    pub enabled: bool,
+    pub min_verified_samples: u64,
+    pub verify_rate_floor: f32,
+    pub verify_rate_ceiling: f32,
+    pub max_theta_shift: f32,
+}
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -14,8 +23,10 @@ pub struct AppConfig {
     pub routing_mode: RoutingMode,
     pub edge_base_url: Option<String>,
     pub edge_api_key: Option<String>,
+    pub edge_model: Option<String>,
     pub cloud_base_url: Option<String>,
     pub cloud_api_key: Option<String>,
+    pub cloud_model: Option<String>,
     pub default_profile: Profile,
     pub ctx_edge_max_tokens: u32,
     pub data_dir: PathBuf,
@@ -27,8 +38,9 @@ pub struct AppConfig {
     pub experience: ExperienceSettings,
     pub cloud_sticky_ttl_secs: u64,
     pub session_persist_enabled: bool,
-    /// Work-step cloud verification sample rate in `[0.0, 1.0]`.
+    /// Work-step cloud verification sample rate in `[0.0, 1.0]` (config baseline).
     pub work_verify_sample_rate: f32,
+    pub adaptive_routing: AdaptiveRoutingSettings,
 }
 
 impl AppConfig {
@@ -69,26 +81,28 @@ impl AppConfig {
                 .upstream
                 .edge
                 .as_ref()
-                .map(|e| e.base_url.clone())
-                .filter(|s| !s.is_empty()),
+                .filter(|e| endpoint_configured(e))
+                .map(|e| e.base_url.clone()),
             edge_api_key: file
                 .upstream
                 .edge
                 .as_ref()
                 .and_then(|e| e.api_key.clone())
                 .filter(|s| !s.is_empty()),
+            edge_model: file.upstream.edge.as_ref().and_then(|e| e.model.clone()),
             cloud_base_url: file
                 .upstream
                 .cloud
                 .as_ref()
-                .map(|c| c.base_url.clone())
-                .filter(|s| !s.is_empty()),
+                .filter(|e| endpoint_configured(e))
+                .map(|e| e.base_url.clone()),
             cloud_api_key: file
                 .upstream
                 .cloud
                 .as_ref()
-                .and_then(|c| c.api_key.clone())
+                .and_then(|e| e.api_key.clone())
                 .filter(|s| !s.is_empty()),
+            cloud_model: file.upstream.cloud.as_ref().and_then(|e| e.model.clone()),
             default_profile,
             ctx_edge_max_tokens: file.gateway.ctx_edge_max_tokens,
             data_dir,
@@ -105,6 +119,13 @@ impl AppConfig {
             cloud_sticky_ttl_secs: file.gateway.cloud_sticky_ttl_secs,
             session_persist_enabled: file.gateway.session_persist_enabled,
             work_verify_sample_rate: file.gateway.work_verify_sample_rate.clamp(0.0, 1.0),
+            adaptive_routing: AdaptiveRoutingSettings {
+                enabled: file.gateway.adaptive_routing_enabled,
+                min_verified_samples: file.gateway.adaptive_min_verified_samples,
+                verify_rate_floor: file.gateway.adaptive_verify_rate_floor.clamp(0.0, 1.0),
+                verify_rate_ceiling: file.gateway.adaptive_verify_rate_ceiling.clamp(0.0, 1.0),
+                max_theta_shift: file.gateway.adaptive_max_theta_shift.max(0.0),
+            },
         })
     }
 

@@ -11,8 +11,11 @@ use super::gates::check_hard_gates;
 use super::policy::{self, Profile};
 use super::signals::SignalExtractor;
 use super::step_kind::{StepKind, resolve_step_kind};
+use super::edge_busy::apply_edge_busy_fallback;
 use super::upstream_availability::{cloud_configured, edge_configured, finalize_route};
 use super::work::{WorkStrategy, apply_work_route};
+use crate::gateway::edge_load::EdgeInferenceTracker;
+use crate::gateway::routing::adaptive::EffectiveRouting;
 use crate::gateway::session::SessionStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -71,6 +74,8 @@ pub fn decide(
     sessions: &SessionStore,
     experience: Option<&ExperienceStore>,
     multimodal: Option<&MultimodalStore>,
+    routing: &EffectiveRouting,
+    edge_load: Option<&EdgeInferenceTracker>,
 ) -> RouteDecision {
     let profile = config.default_profile;
     let mode = config.routing_mode;
@@ -89,9 +94,16 @@ pub fn decide(
     reason_codes.push(format!("STEP_{}", step_kind_code(step_kind)));
 
     if let Some(fixed) = config.fixed_route {
-        let mut route = fixed;
-        reason_codes.push(format!("CONFIG_ROUTE_{}", tier_name(route)));
-        route = finalize_route(route, config, &mut reason_codes);
+        reason_codes.push(format!("CONFIG_ROUTE_{}", tier_name(fixed)));
+        let (route, work, mm) = apply_edge_busy_fallback(
+            fixed,
+            WorkStrategy::None,
+            MultimodalStrategy::None,
+            config,
+            edge_load,
+            &mut reason_codes,
+        );
+        let route = finalize_route(route, config, &mut reason_codes);
         sessions.record_tokens(&conv_key, signals.tok_total_in);
         return finish(
             route,
@@ -104,8 +116,8 @@ pub fn decide(
             0.0,
             conv_key,
             signals.assistant_failed_recent,
-            MultimodalStrategy::None,
-            WorkStrategy::None,
+            mm,
+            work,
         );
     }
 
@@ -147,7 +159,30 @@ pub fn decide(
         config.ctx_edge_max_tokens,
         exp_bias,
     );
-    let mut route = policy::map_policy(d, step_kind, profile, mode);
+    let mut route = policy::map_policy_with_thresholds(
+        d,
+        step_kind,
+        profile,
+        mode,
+        routing.theta_edge,
+        routing.theta_cloud,
+    );
+
+    if routing.enabled {
+        reason_codes.push(format!(
+            "ADAPTIVE_VERIFY(p={:.2})",
+            routing.work_verify_sample_rate
+        ));
+        reason_codes.push(format!(
+            "ADAPTIVE_THETA({:.2},{:.2})",
+            routing.theta_edge, routing.theta_cloud
+        ));
+        for r in &routing.reasons {
+            if r.starts_with("ADAPTIVE_") && !reason_codes.iter().any(|x| x == r) {
+                reason_codes.push(r.clone());
+            }
+        }
+    }
 
     reason_codes.push(format!("DIFFICULTY_{:.2}", d.0));
     reason_codes.push(format!("TOK_IN_{}", signals.tok_total_in));
@@ -160,10 +195,11 @@ pub fn decide(
         experience,
         &conv_key,
         signals.tok_total_in,
+        routing.work_verify_sample_rate,
         &mut reason_codes,
     );
 
-    let (mut route, multimodal_strategy) = apply_multimodal_route(
+    let (route, multimodal_strategy) = apply_multimodal_route(
         route,
         &signals,
         step_kind,
@@ -172,7 +208,15 @@ pub fn decide(
         multimodal,
         &mut reason_codes,
     );
-    route = finalize_route(route, config, &mut reason_codes);
+    let (route, work_strategy, multimodal_strategy) = apply_edge_busy_fallback(
+        route,
+        work_strategy,
+        multimodal_strategy,
+        config,
+        edge_load,
+        &mut reason_codes,
+    );
+    let route = finalize_route(route, config, &mut reason_codes);
     sessions.record_tokens(&conv_key, signals.tok_total_in);
 
     finish(

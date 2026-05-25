@@ -67,6 +67,42 @@ impl GatewayClient {
         self.get("/v1/admin/stats?scope=global", false).await
     }
 
+    pub async fn setup_get(&self) -> Result<crate::config::UpstreamSetupView> {
+        self.get("/v1/admin/setup", false).await
+    }
+
+    pub async fn setup_init(&self) -> Result<serde_json::Value> {
+        let mut req = self.http.post(format!("{}/v1/admin/setup/init", self.base));
+        req = self.attach_admin_token(req);
+        let resp = req.send().await.context("POST /v1/admin/setup/init")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            bail!("setup init failed {status}: {body}");
+        }
+        resp.json().await.context("decode setup init response")
+    }
+
+    pub async fn setup_update(
+        &self,
+        patch: &crate::config::UpstreamSetupUpdate,
+    ) -> Result<crate::config::UpstreamSetupView> {
+        let mut req = self
+            .http
+            .post(format!("{}/v1/admin/setup", self.base))
+            .json(patch);
+        req = self.attach_admin_token(req);
+        let resp = req.send().await.context("POST /v1/admin/setup")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            bail!("setup update failed {status}: {body}");
+        }
+        let body: serde_json::Value = resp.json().await.context("decode setup response")?;
+        serde_json::from_value(body["upstream"].clone())
+            .context("decode setup upstream view")
+    }
+
     pub async fn shutdown(&self) -> Result<serde_json::Value> {
         let mut req = self.http.post(format!("{}/v1/admin/shutdown", self.base));
         req = self.attach_admin_token(req);

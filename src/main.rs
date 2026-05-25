@@ -4,6 +4,7 @@ mod config;
 mod daemon_ctl;
 mod env_cmd;
 mod gateway;
+mod setup_cmd;
 mod stats_cmd;
 
 use std::path::PathBuf;
@@ -46,12 +47,40 @@ enum Commands {
         #[arg(long, default_value = "en", value_name = "LANG")]
         lang: String,
     },
-    /// Manage the gateway daemon: start, stop, status, restart, run.
+    /// Initialize or update upstream model settings (cloud model=auto, edge empty by default).
+    Setup {
+        /// Apply via running gateway HTTP API instead of local config.toml.
+        #[arg(long)]
+        remote: bool,
+        /// Skip interactive prompts (initialize defaults only).
+        #[arg(long)]
+        non_interactive: bool,
+        #[arg(long)]
+        json: bool,
+        /// Reset to defaults (cloud model auto, edge cleared).
+        #[arg(long)]
+        reset: bool,
+        #[arg(long)]
+        cloud_url: Option<String>,
+        #[arg(long)]
+        cloud_key: Option<String>,
+        #[arg(long)]
+        cloud_model: Option<String>,
+        #[arg(long)]
+        edge_url: Option<String>,
+        #[arg(long)]
+        edge_key: Option<String>,
+        #[arg(long)]
+        edge_model: Option<String>,
+        #[arg(long)]
+        clear_edge: bool,
+    },
+    /// Manage the gateway daemon: start, stop, status, restart.
     #[command(subcommand)]
     Gateway(GatewayCommands),
     /// Hidden entry for the gateway daemon (re-invoked by `gateway start`).
     #[command(hide = true, name = "__serve")]
-    Serve(ServeArgs),
+    Serve,
 }
 
 #[derive(Debug, Subcommand)]
@@ -60,7 +89,6 @@ enum GatewayCommands {
         #[arg(long, default_value_t = 30)]
         wait: u64,
     },
-    Run,
     Stop {
         #[arg(short, long)]
         force: bool,
@@ -73,17 +101,6 @@ enum GatewayCommands {
         #[arg(long, default_value_t = 30)]
         wait: u64,
     },
-}
-
-#[derive(Debug, Parser)]
-struct ServeArgs {
-    /// Run in background daemon mode (write pid file).
-    #[arg(long)]
-    daemon: bool,
-
-    /// Run in foreground (no pid file).
-    #[arg(long)]
-    foreground: bool,
 }
 
 fn ensure_settings(config_override: &Option<PathBuf>) -> Result<(CliSettings, bool)> {
@@ -118,10 +135,10 @@ fn print_init_message(created: bool, path: &std::path::Path) {
     }
 }
 
-async fn run_serve(config_override: Option<PathBuf>, daemon: bool) -> Result<()> {
+async fn run_serve(config_override: Option<PathBuf>) -> Result<()> {
     let app_config = AppConfig::load_from(config_override.as_deref())?;
 
-    let log_path = init_logging(&app_config.data_dir, !daemon)?;
+    let log_path = init_logging(&app_config.data_dir, false)?;
     info!(
         config = %app_config.config_path.display(),
         app_dir = %app_config.data_dir.display(),
@@ -129,14 +146,9 @@ async fn run_serve(config_override: Option<PathBuf>, daemon: bool) -> Result<()>
         "using config file"
     );
 
-    if daemon {
-        gateway::daemon::assert_not_running(&app_config)?;
-        info!(pid_file = %app_config.pid_file.display(), "starting gateway daemon");
-        return gateway::run(app_config, true).await;
-    }
-
-    info!("starting gateway in foreground");
-    gateway::run(app_config, false).await
+    gateway::daemon::assert_not_running(&app_config)?;
+    info!(pid_file = %app_config.pid_file.display(), "starting gateway daemon");
+    gateway::run(app_config, true).await
 }
 
 #[tokio::main]
@@ -145,10 +157,42 @@ async fn main() -> Result<()> {
     let config_override = cli.config.clone();
 
     match cli.command {
-        Commands::Serve(args) => run_serve(config_override, args.daemon).await,
+        Commands::Serve => run_serve(config_override).await,
         Commands::Env { json } => env_cmd::print_env(&config_override, json),
         Commands::Stats { global, json, lang } => {
             stats_cmd::print_stats(&config_override, global, json, &lang).await
+        }
+        Commands::Setup {
+            remote,
+            non_interactive,
+            json,
+            reset,
+            cloud_url,
+            cloud_key,
+            cloud_model,
+            edge_url,
+            edge_key,
+            edge_model,
+            clear_edge,
+        } => {
+            let patch = setup_cmd::patch_from_cli(
+                edge_url,
+                edge_key,
+                edge_model,
+                cloud_url,
+                cloud_key,
+                cloud_model,
+                clear_edge,
+            );
+            setup_cmd::run_setup(
+                &config_override,
+                remote,
+                json,
+                non_interactive,
+                patch,
+                reset,
+            )
+            .await
         }
         Commands::Gateway(cmd) => match cmd {
             GatewayCommands::Start { wait } => {
@@ -156,11 +200,6 @@ async fn main() -> Result<()> {
                 print_init_message(created, &settings.config_path);
                 let gw = make_client(&settings);
                 daemon_ctl::start_daemon(&gw, &settings, wait).await
-            }
-            GatewayCommands::Run => {
-                let (settings, created) = ensure_settings(&config_override)?;
-                print_init_message(created, &settings.config_path);
-                daemon_ctl::run_foreground(&settings).await
             }
             GatewayCommands::Stop { force } => {
                 let settings = load_settings(&config_override)?;

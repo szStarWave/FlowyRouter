@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use crate::gateway::config::AppConfig;
 use crate::gateway::experience::{ExperienceSettings, ExperienceSnapshot, ExperienceStore};
+use crate::gateway::routing::compute_effective_routing;
 use crate::gateway::stats::{self, StatsScope};
 use serde::{Deserialize, Serialize};
 
@@ -110,6 +112,15 @@ struct StatsLabels {
     exp_sub_steps: &'static str,
     exp_trusted_yes: &'static str,
     exp_trusted_no: &'static str,
+    section_adaptive: &'static str,
+    adaptive_enabled: &'static str,
+    adaptive_verify_rate: &'static str,
+    adaptive_verify_base: &'static str,
+    adaptive_theta_edge: &'static str,
+    adaptive_theta_edge_base: &'static str,
+    adaptive_theta_cloud: &'static str,
+    adaptive_theta_cloud_base: &'static str,
+    adaptive_reasons: &'static str,
     tier_in: &'static str,
     tier_out: &'static str,
     tier_cached: &'static str,
@@ -205,6 +216,15 @@ fn labels(lang: StatsLang) -> StatsLabels {
             exp_sub_steps: "Per step_kind",
             exp_trusted_yes: "yes",
             exp_trusted_no: "no",
+            section_adaptive: "Adaptive routing (runtime)",
+            adaptive_enabled: "enabled",
+            adaptive_verify_rate: "work verify sample rate",
+            adaptive_verify_base: "config baseline",
+            adaptive_theta_edge: "θ_edge (effective)",
+            adaptive_theta_edge_base: "θ_edge (config)",
+            adaptive_theta_cloud: "θ_cloud (effective)",
+            adaptive_theta_cloud_base: "θ_cloud (config)",
+            adaptive_reasons: "reason codes",
             tier_in: "in",
             tier_out: "out",
             tier_cached: "cached",
@@ -297,6 +317,15 @@ fn labels(lang: StatsLang) -> StatsLabels {
             exp_sub_steps: "步态明细",
             exp_trusted_yes: "是",
             exp_trusted_no: "否",
+            section_adaptive: "自适应路由（运行时）",
+            adaptive_enabled: "已启用",
+            adaptive_verify_rate: "work 校验抽样率",
+            adaptive_verify_base: "配置基线",
+            adaptive_theta_edge: "θ_edge（生效）",
+            adaptive_theta_edge_base: "θ_edge（配置）",
+            adaptive_theta_cloud: "θ_cloud（生效）",
+            adaptive_theta_cloud_base: "θ_cloud（配置）",
+            adaptive_reasons: "调整原因",
             tier_in: "输入",
             tier_out: "输出",
             tier_cached: "缓存",
@@ -353,6 +382,19 @@ pub struct GatewayStats {
     pub errors: ErrorCounts,
     pub step_kinds: std::collections::HashMap<String, u64>,
     pub experience: Option<ExperienceSection>,
+    pub effective_routing: Option<AdaptiveRoutingSection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptiveRoutingSection {
+    pub enabled: bool,
+    pub work_verify_sample_rate: f32,
+    pub theta_edge: f32,
+    pub theta_cloud: f32,
+    pub base_verify_sample_rate: f32,
+    pub base_theta_edge: f32,
+    pub base_theta_cloud: f32,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -547,12 +589,22 @@ fn load_global_stats_from_disk(settings: &CliSettings) -> Result<GatewayStats> {
     let data = stats::data::load(&stats_path)?;
     let data_dir = crate::config::app_dir()?;
     let experience = experience_snapshot_from_disk(&data_dir, settings).ok();
+    let effective_routing = experience.as_ref().and_then(|exp| {
+        let config = AppConfig::from_file(settings.file.clone(), settings.config_path.clone()).ok()?;
+        Some(compute_effective_routing(
+            &config,
+            exp,
+            Some(&data),
+            &config.adaptive_routing,
+        ))
+    });
     let snap = stats::build_snapshot(
         &data,
         StatsScope::Global,
         stats_path.display().to_string(),
         0,
         experience,
+        effective_routing,
     );
     Ok(from_snapshot(snap))
 }
@@ -654,6 +706,20 @@ fn from_snapshot(s: stats::StatsSnapshot) -> GatewayStats {
         },
         step_kinds: s.step_kinds,
         experience: s.experience.map(experience_from_snapshot),
+        effective_routing: s.effective_routing.map(adaptive_from_snapshot),
+    }
+}
+
+fn adaptive_from_snapshot(r: stats::EffectiveRouting) -> AdaptiveRoutingSection {
+    AdaptiveRoutingSection {
+        enabled: r.enabled,
+        work_verify_sample_rate: r.work_verify_sample_rate,
+        theta_edge: r.theta_edge,
+        theta_cloud: r.theta_cloud,
+        base_verify_sample_rate: r.base_verify_sample_rate,
+        base_theta_edge: r.base_theta_edge,
+        base_theta_cloud: r.base_theta_cloud,
+        reasons: r.reasons,
     }
 }
 
@@ -934,6 +1000,9 @@ fn print_human(s: &GatewayStats, gateway_url: &str, lang: StatsLang) {
     if let Some(exp) = &s.experience {
         print_experience(&f, &l, exp, lang);
     }
+    if let Some(adaptive) = &s.effective_routing {
+        print_adaptive(&f, &l, adaptive);
+    }
     println!();
 }
 
@@ -1074,6 +1143,30 @@ fn print_experience(f: &Fmt, l: &StatsLabels, exp: &ExperienceSection, lang: Sta
             row.bias,
             trust
         );
+    }
+}
+
+fn print_adaptive(f: &Fmt, l: &StatsLabels, r: &AdaptiveRoutingSection) {
+    f.section(l.section_adaptive);
+    f.kv(l.adaptive_enabled, r.enabled);
+    f.kv_f64(
+        l.adaptive_verify_rate,
+        r.work_verify_sample_rate as f64 * 100.0,
+        1,
+        "%",
+    );
+    f.kv_f64(
+        l.adaptive_verify_base,
+        r.base_verify_sample_rate as f64 * 100.0,
+        1,
+        "%",
+    );
+    f.kv_f64(l.adaptive_theta_edge, r.theta_edge as f64, 3, "");
+    f.kv_f64(l.adaptive_theta_edge_base, r.base_theta_edge as f64, 3, "");
+    f.kv_f64(l.adaptive_theta_cloud, r.theta_cloud as f64, 3, "");
+    f.kv_f64(l.adaptive_theta_cloud_base, r.base_theta_cloud as f64, 3, "");
+    if !r.reasons.is_empty() {
+        f.kv(l.adaptive_reasons, r.reasons.join(", "));
     }
 }
 

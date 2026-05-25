@@ -1,70 +1,77 @@
-# Flowy Router — 示例配置
-# 复制到用户目录后编辑上游 base_url（api_key 均为选填）：
+# Flowy Router — 推荐示例配置
+#
+# 复制:
 #   Linux/macOS: cp example/config.toml ~/.flowy-router/config.toml
 #   Windows:     copy example\config.toml %USERPROFILE%\.flowy-router\config.toml
 #
-# 或使用自定义路径启动：
-#   flowy --config /path/to/config.toml gateway start
+# 或直接指定:
+#   flowy --config example/config.toml gateway start
+#   make start CONFIG=example/config.toml
 
 # ---------------------------------------------------------------------------
-# Gateway：监听、路由策略、管理接口
+# Gateway
 # ---------------------------------------------------------------------------
 [gateway]
-# 监听地址（OpenClaw / Hermes 的 baseUrl 须指向 http://<listen>/v1）
-listen = "127.0.0.1:8080"
+listen = "127.0.0.1:11080"
 
-# 端/云/级联总开关（仅配置文件控制，不支持请求头覆盖）
-#   auto     — 按难度分 + default_profile + routing_mode 自动选择
-#   edge     — 全部走端侧（端不可用则降级 cloud）
-#   cloud    — 全部走云端
-#   cascade  — 全部走「先 edge 再可能升 cloud」
+# 端/云/级联总开关（仅配置文件控制，请求头不能覆盖）
+#   auto     — 按难度 + profile + routing_mode 自动选择
+#   edge     — 全部端侧（不可用则降级 cloud）
+#   cloud    — 全部云端
+#   cascade  — 每请求先 edge，质量不过关再升 cloud
 route = "auto"
 
-# 仅当 route = "auto" 时生效：
-#   single   — d 低→edge，否则 cloud（不先试端再升云）
-#   cascade  — d 低→edge；中→先 edge 质量过关则返回，否则升 cloud；高→cloud
-#   split    — 当前实现等同一律 cloud
+# 仅 route = "auto" 时生效:
+#   single   — 低难度 edge，否则 cloud
+#   cascade  — 低 edge；中 先 edge 再可能升 cloud；高 cloud
+#   split    — 当前实现等同全部 cloud
 routing_mode = "cascade"
 
-# auto 模式下的难度策略（影响 θ_edge / θ_cloud 阈值）
-#   economy | balanced | premium | privacy
+# 难度阈值策略: economy | balanced | premium | privacy
 default_profile = "balanced"
 
-# 端侧上下文上限（token 估算），超过约 80% 会触发 GATE_CTX_OVERFLOW 走云
+# 端侧上下文 token 上限；超过约 80% 触发 GATE_CTX_OVERFLOW → 走云
 ctx_edge_max_tokens = 65536
 
-# 可选：入站鉴权；配置后客户端须带 Authorization: Bearer 或 x-api-key
+# 可选：入站鉴权（Authorization: Bearer 或 x-api-key）
 # api_key = "flowy-local"
 
-# 可选：保护 POST /v1/admin/shutdown，请求头 X-Flowy-Admin-Token
+# 可选：保护 POST /v1/admin/shutdown（头 X-Flowy-Admin-Token）
 # admin_token = "change-me"
 
-# 经验系统（隐式学习 + 会话 cloud_sticky，持久化到 experience.json / sessions/）
+# --- 经验学习（持久化 experience.json）---
 # experience_enabled = true
-# experience_learning_rate = 0.08
-# experience_max_bias = 0.12
-# cloud_sticky_ttl_secs = 600
+# experience_learning_rate = 0.08      # 偏置更新强度
+# experience_max_bias = 0.12           # 单 step_kind 偏置上限
+# experience_target_fallback = 0.15    # 级联回退目标比例（自适应路由参考）
+# cloud_sticky_ttl_secs = 600          # 升云后会话粘性（秒）
 # session_persist_enabled = true
 
-# work 步态（ToolSelect 等）云端校验抽样比例：0=不校验直接走端，1=每次都校验，默认 0.1
-# work_verify_sample_rate = 0.1
+# --- Work 步态云端校验（ToolSelect 等）---
+# work_verify_sample_rate = 0.1        # 0=不校验，1=每步校验；默认 0.1
+
+# --- 运行时自适应（仅内存，不写回配置；见 flowy stats 自适应分区）---
+# adaptive_routing_enabled = true
+# adaptive_min_verified_samples = 20   # 预热：云验证样本不足时用上面基线
+# adaptive_verify_rate_floor = 0.05
+# adaptive_verify_rate_ceiling = 0.45
+# adaptive_max_theta_shift = 0.05      # 健康时放宽 θ_edge，提高端侧占比
 
 # ---------------------------------------------------------------------------
-# 上游模型（OpenAI 兼容 Chat Completions）
+# 上游（OpenAI 兼容 Chat Completions）
 # ---------------------------------------------------------------------------
 [upstream.edge]
-# 端侧：Ollama / vLLM / LM Studio 等
 base_url = "http://127.0.0.1:11434/v1"
-# api_key = "ollama"   # 转发到端侧上游的 Bearer（Ollama 等需要时填写）
+# model = "qwen3"          # 端侧上游模型；setup 默认不创建 edge 段
+# api_key = "ollama"
 
 [upstream.cloud]
-# 云端：DeepSeek / OpenAI / 其他兼容 API
 base_url = "https://api.deepseek.com/v1"
-# api_key = "sk-your-deepseek-api-key"   # 上游需要鉴权时填写（DeepSeek 等）
+model = "auto"               # auto = 保留客户端 model，由 Flowy 路由
+# api_key = "sk-your-deepseek-api-key"
 
 # ---------------------------------------------------------------------------
-# CLI：管理命令访问 Gateway 的 HTTP 地址
+# CLI
 # ---------------------------------------------------------------------------
 [cli]
-# 默认同 http://{gateway.listen}，CLI 与 Gateway 不在同一机器时修改
-# gateway_url = "http://127.0.0.1:8080"
+# gateway_url = "http://127.0.0.1:11080"

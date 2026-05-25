@@ -1,14 +1,25 @@
-# 示例：全部走端侧（本地 Ollama），适合离线或省 Cloud 费用
-# 使用: flowy --config example/config.edge-only.toml gateway start
+# 示例：全部走端侧（本地 Ollama）
+#
+# 适用: 离线、隐私、或已有足够强的本地模型
+# 使用:
+#   flowy --config example/config.edge-only.toml gateway start
+#   make start CONFIG=example/config.edge-only.toml
+#
+# 说明:
+#   route = edge 时跳过 auto/级联/自适应阈值逻辑；经验学习仍可记录 outcome。
+#   若需 cloud 兜底，请改用 config.toml（route = auto）并只配 edge 上游。
 
 [gateway]
-listen = "127.0.0.1:8080"
+listen = "127.0.0.1:11080"
 route = "edge"
-routing_mode = "single"
+routing_mode = "single"       # route=edge 时此项无实际影响
 default_profile = "privacy"
 ctx_edge_max_tokens = 65536
 
+# experience_enabled = true   # 可选：仍收集步态统计
+
 [upstream.edge]
 base_url = "http://127.0.0.1:11434/v1"
+# api_key = "ollama"
 
 [cli]

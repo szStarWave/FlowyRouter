@@ -19,6 +19,7 @@ pub struct StreamRecordContext {
     pub prompt_fallback: u32,
     pub cloud_input_saved: u32,
     pub record_cloud_saved: bool,
+    pub edge_guard: Option<crate::gateway::edge_load::EdgeInferenceGuard>,
 }
 
 pub fn instrument_stream(inner: SseStream, ctx: StreamRecordContext) -> SseStream {
@@ -185,11 +186,12 @@ mod tests {
                 prompt_fallback: 100,
                 cloud_input_saved: 100,
                 record_cloud_saved: true,
+                edge_guard: None,
             },
         );
         while stream.next().await.is_some() {}
 
-        let snap = stats.snapshot(crate::gateway::stats::StatsScope::Session, 1, None);
+        let snap = stats.snapshot(crate::gateway::stats::StatsScope::Session, 1, None, None);
         assert_eq!(snap.token_breakdown.edge.input, 10);
         assert_eq!(snap.token_breakdown.edge.output, 5);
         assert_eq!(snap.cache.cached_tokens, 3);

@@ -146,10 +146,12 @@ mod tests {
         file.upstream.edge = Some(UpstreamEndpoint {
             base_url: edge_url.into(),
             api_key: None,
+            model: None,
         });
         file.upstream.cloud = Some(UpstreamEndpoint {
             base_url: cloud_url.into(),
             api_key: None,
+            model: None,
         });
         AppConfig::from_file(file, std::path::PathBuf::from("/tmp/flowy-test-config.toml"))
             .unwrap()

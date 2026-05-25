@@ -50,6 +50,17 @@ pub struct GatewaySection {
     /// Fraction of work-step requests that run edge + cloud verification (0.0–1.0).
     #[serde(default = "default_work_verify_sample_rate")]
     pub work_verify_sample_rate: f32,
+    /// Runtime auto-tuning from experience.json + stats (see adaptive_*).
+    #[serde(default = "default_adaptive_routing_enabled")]
+    pub adaptive_routing_enabled: bool,
+    #[serde(default = "default_adaptive_min_verified_samples")]
+    pub adaptive_min_verified_samples: u64,
+    #[serde(default = "default_adaptive_verify_rate_floor")]
+    pub adaptive_verify_rate_floor: f32,
+    #[serde(default = "default_adaptive_verify_rate_ceiling")]
+    pub adaptive_verify_rate_ceiling: f32,
+    #[serde(default = "default_adaptive_max_theta_shift")]
+    pub adaptive_max_theta_shift: f32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -62,9 +73,13 @@ pub struct UpstreamSection {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpstreamEndpoint {
+    #[serde(default)]
     pub base_url: String,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Upstream model id; `auto` keeps the client request model for Flowy routing.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -75,7 +90,7 @@ pub struct CliSection {
 }
 
 fn default_listen() -> String {
-    "127.0.0.1:8080".to_string()
+    "127.0.0.1:11080".to_string()
 }
 
 fn default_route() -> String {
@@ -122,6 +137,26 @@ fn default_work_verify_sample_rate() -> f32 {
     0.1
 }
 
+fn default_adaptive_routing_enabled() -> bool {
+    true
+}
+
+fn default_adaptive_min_verified_samples() -> u64 {
+    20
+}
+
+fn default_adaptive_verify_rate_floor() -> f32 {
+    0.05
+}
+
+fn default_adaptive_verify_rate_ceiling() -> f32 {
+    0.45
+}
+
+fn default_adaptive_max_theta_shift() -> f32 {
+    0.05
+}
+
 impl Default for GatewaySection {
     fn default() -> Self {
         Self {
@@ -139,6 +174,11 @@ impl Default for GatewaySection {
             cloud_sticky_ttl_secs: default_cloud_sticky_ttl_secs(),
             session_persist_enabled: default_session_persist_enabled(),
             work_verify_sample_rate: default_work_verify_sample_rate(),
+            adaptive_routing_enabled: default_adaptive_routing_enabled(),
+            adaptive_min_verified_samples: default_adaptive_min_verified_samples(),
+            adaptive_verify_rate_floor: default_adaptive_verify_rate_floor(),
+            adaptive_verify_rate_ceiling: default_adaptive_verify_rate_ceiling(),
+            adaptive_max_theta_shift: default_adaptive_max_theta_shift(),
         }
     }
 }
@@ -176,7 +216,7 @@ pub fn default_config_template() -> String {
 # Path: ~/.flowy-router/config.toml (Linux/macOS) or %USERPROFILE%\.flowy-router\config.toml (Windows)
 
 [gateway]
-listen = "127.0.0.1:8080"
+listen = "127.0.0.1:11080"
 route = "auto"                 # auto | edge | cloud | cascade
 routing_mode = "cascade"       # single | cascade | split (when route = auto)
 default_profile = "balanced"   # economy | balanced | premium | privacy
@@ -189,17 +229,23 @@ ctx_edge_max_tokens = 65536
 # cloud_sticky_ttl_secs = 600
 # session_persist_enabled = true
 # work_verify_sample_rate = 0.1   # work 步态云端校验抽样比例 (0.0–1.0)
-
-# [upstream.edge]
-# base_url = "http://127.0.0.1:11434/v1"
-# api_key = "ollama"             # optional: Bearer to edge upstream when set
+# adaptive_routing_enabled = true # 根据 experience/stats 运行时微调抽样率与难度阈值
+# adaptive_min_verified_samples = 20
+# adaptive_verify_rate_floor = 0.05
+# adaptive_verify_rate_ceiling = 0.45
+# adaptive_max_theta_shift = 0.05
 
 # [upstream.cloud]
 # base_url = "https://api.deepseek.com/v1"
+# model = "auto"                 # auto = keep client model; or set e.g. deepseek-chat
 # api_key = "sk-..."             # optional: Bearer to cloud upstream when set
 
+# [upstream.edge]
+# base_url = "http://127.0.0.1:11434/v1"
+# model = "qwen3:8b"             # optional; omit or auto = keep client model
+
 [cli]
-# gateway_url = "http://127.0.0.1:8080"
+# gateway_url = "http://127.0.0.1:11080"
 "#
     .to_string()
 }

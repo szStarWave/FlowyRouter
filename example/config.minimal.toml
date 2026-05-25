@@ -1,11 +1,27 @@
-# 示例：最小配置（Gateway 可启动；聊天前须至少配置 [upstream.edge] 或 [upstream.cloud]）
-# 使用: flowy --config example/config.minimal.toml gateway start
+# 示例：最小配置（Gateway 可启动；聊天前须至少一侧 upstream）
+#
+# 首次 flowy gateway start 自动生成的默认模板与此结构类似。
+# 使用:
+#   flowy --config example/config.minimal.toml gateway start
+#
+# 启动后编辑本文件，取消注释并填写 [upstream.edge] 或 [upstream.cloud]，再 restart。
 
 [gateway]
-listen = "127.0.0.1:8080"
+listen = "127.0.0.1:11080"
 route = "auto"
 routing_mode = "cascade"
 default_profile = "balanced"
 ctx_edge_max_tokens = 65536
+
+# 以下为常用可选项（默认与 config.toml 注释块相同）:
+# experience_enabled = true
+# work_verify_sample_rate = 0.1
+# adaptive_routing_enabled = true
+
+# [upstream.edge]
+# base_url = "http://127.0.0.1:11434/v1"
+
+# [upstream.cloud]
+# base_url = "https://api.deepseek.com/v1"
 
 [cli]

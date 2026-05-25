@@ -1,0 +1,113 @@
+use crate::gateway::edge_load::EdgeInferenceTracker;
+use crate::gateway::multimodal::MultimodalStrategy;
+
+use super::decision::RouteTier;
+use super::upstream_availability::cloud_configured;
+use super::work::WorkStrategy;
+use crate::gateway::config::AppConfig;
+
+fn would_use_edge(route: RouteTier, work: WorkStrategy, multimodal: MultimodalStrategy) -> bool {
+    matches!(route, RouteTier::Edge | RouteTier::Cascade)
+        || matches!(work, WorkStrategy::CachedEdge | WorkStrategy::Verify)
+        || matches!(
+            multimodal,
+            MultimodalStrategy::CachedEdge
+                | MultimodalStrategy::CachedEdgeFallback
+                | MultimodalStrategy::Probe
+        )
+}
+
+/// When edge is mid-inference and cloud is available, skip edge and route cloud directly.
+pub fn apply_edge_busy_fallback(
+    route: RouteTier,
+    work: WorkStrategy,
+    multimodal: MultimodalStrategy,
+    config: &AppConfig,
+    edge_load: Option<&EdgeInferenceTracker>,
+    reason_codes: &mut Vec<String>,
+) -> (RouteTier, WorkStrategy, MultimodalStrategy) {
+    let Some(tracker) = edge_load else {
+        return (route, work, multimodal);
+    };
+    if !tracker.is_busy() || !cloud_configured(config) || !would_use_edge(route, work, multimodal) {
+        return (route, work, multimodal);
+    }
+
+    reason_codes.push("GATE_EDGE_BUSY".to_string());
+
+    let route = match route {
+        RouteTier::Edge | RouteTier::Cascade => RouteTier::Cloud,
+        RouteTier::Cloud => RouteTier::Cloud,
+    };
+    let work = match work {
+        WorkStrategy::CachedEdge | WorkStrategy::Verify => WorkStrategy::None,
+        other => other,
+    };
+    let multimodal = match multimodal {
+        MultimodalStrategy::CachedEdge
+        | MultimodalStrategy::CachedEdgeFallback
+        | MultimodalStrategy::Probe => MultimodalStrategy::None,
+        other => other,
+    };
+
+    (route, work, multimodal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ConfigFile, UpstreamEndpoint};
+    use crate::gateway::config::AppConfig;
+
+    fn dual_config() -> AppConfig {
+        let mut file = ConfigFile::default();
+        file.upstream.edge = Some(UpstreamEndpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            api_key: None,
+            model: None,
+        });
+        file.upstream.cloud = Some(UpstreamEndpoint {
+            base_url: "https://api.example.com/v1".into(),
+            api_key: None,
+            model: None,
+        });
+        AppConfig::from_file(file, "/tmp/flowy-edge-busy.toml".into()).unwrap()
+    }
+
+    #[test]
+    fn idle_keeps_edge_route() {
+        let config = dual_config();
+        let tracker = EdgeInferenceTracker::new();
+        let mut codes = Vec::new();
+        let (route, _, _) = apply_edge_busy_fallback(
+            RouteTier::Edge,
+            WorkStrategy::None,
+            MultimodalStrategy::None,
+            &config,
+            Some(tracker.as_ref()),
+            &mut codes,
+        );
+        assert_eq!(route, RouteTier::Edge);
+        assert!(codes.is_empty());
+    }
+
+    #[test]
+    fn busy_forces_cloud() {
+        let config = dual_config();
+        let tracker = EdgeInferenceTracker::new();
+        let _g = tracker.begin();
+        let mut codes = Vec::new();
+        let (route, work, mm) = apply_edge_busy_fallback(
+            RouteTier::Cascade,
+            WorkStrategy::Verify,
+            MultimodalStrategy::None,
+            &config,
+            Some(tracker.as_ref()),
+            &mut codes,
+        );
+        assert_eq!(route, RouteTier::Cloud);
+        assert_eq!(work, WorkStrategy::None);
+        assert_eq!(mm, MultimodalStrategy::None);
+        assert!(codes.iter().any(|c| c == "GATE_EDGE_BUSY"));
+    }
+}

@@ -10,6 +10,7 @@ use serde::Serialize;
 
 pub use data::StatsData;
 pub use metrics::{FinalResponseMetrics, UpstreamCallMetrics};
+pub use crate::gateway::routing::EffectiveRouting;
 
 use crate::gateway::error::AppError;
 use crate::gateway::experience::ExperienceSnapshot;
@@ -138,6 +139,7 @@ impl GatewayStats {
         scope: StatsScope,
         session_uptime_secs: u64,
         experience: Option<ExperienceSnapshot>,
+        effective_routing: Option<EffectiveRouting>,
     ) -> StatsSnapshot {
         let data = match scope {
             StatsScope::Session => self.session.lock().expect("stats session mutex").clone(),
@@ -149,11 +151,16 @@ impl GatewayStats {
             self.path.display().to_string(),
             session_uptime_secs,
             experience,
+            effective_routing,
         )
     }
 
     pub fn session_uptime_secs(&self) -> u64 {
         self.session_started.elapsed().as_secs()
+    }
+
+    pub fn global_data(&self) -> StatsData {
+        self.global.lock().expect("stats global mutex").clone()
     }
 
     pub fn spawn_flush_task(self: &std::sync::Arc<Self>) {
@@ -177,6 +184,7 @@ pub fn build_snapshot(
     stats_file: String,
     session_uptime_secs: u64,
     experience: Option<ExperienceSnapshot>,
+    effective_routing: Option<EffectiveRouting>,
 ) -> StatsSnapshot {
     let requests = data.requests_total;
     let difficulty_count = data.difficulty_count;
@@ -327,6 +335,7 @@ pub fn build_snapshot(
         },
         step_kinds: data.step_kinds.clone(),
         experience,
+        effective_routing,
     }
 }
 
@@ -408,6 +417,8 @@ pub struct StatsSnapshot {
     pub step_kinds: std::collections::HashMap<String, u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub experience: Option<ExperienceSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_routing: Option<EffectiveRouting>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -559,7 +570,7 @@ mod tests {
             cloud_input_saved: 100,
             completion_tokens: 50,
         });
-        let snap = stats.snapshot(StatsScope::Session, 60, None);
+        let snap = stats.snapshot(StatsScope::Session, 60, None, None);
         assert_eq!(snap.token_breakdown.edge.input, 100);
         assert_eq!(snap.token_breakdown.cloud.input, 200);
         assert_eq!(snap.token_breakdown.cloud_saved.total, 150);
@@ -575,7 +586,7 @@ mod tests {
         stats.record_request(false);
         stats.record_decision(&sample_decision(RouteTier::Edge));
         stats.record_decision(&sample_decision(RouteTier::Cloud));
-        let snap = stats.snapshot(StatsScope::Session, 60, None);
+        let snap = stats.snapshot(StatsScope::Session, 60, None, None);
         assert_eq!(snap.scope, "session");
         assert_eq!(snap.requests_total, 1);
         assert_eq!(snap.routing.edge, 1);
@@ -583,7 +594,7 @@ mod tests {
         assert_eq!(snap.tokens.in_estimate, 200);
         assert!(snap.step_kinds.contains_key("directchat"));
 
-        let global = stats.snapshot(StatsScope::Global, 60, None);
+        let global = stats.snapshot(StatsScope::Global, 60, None, None);
         assert_eq!(global.scope, "global");
         assert_eq!(global.requests_total, 1);
     }
@@ -599,13 +610,13 @@ mod tests {
             let stats = GatewayStats::open(&dir).unwrap();
             stats.record_request(true);
             stats.flush().unwrap();
-            let session = stats.snapshot(StatsScope::Session, 10, None);
+            let session = stats.snapshot(StatsScope::Session, 10, None, None);
             assert_eq!(session.requests_total, 1);
         }
         {
             let stats = GatewayStats::open(&dir).unwrap();
-            let session = stats.snapshot(StatsScope::Session, 10, None);
-            let global = stats.snapshot(StatsScope::Global, 10, None);
+            let session = stats.snapshot(StatsScope::Session, 10, None, None);
+            let global = stats.snapshot(StatsScope::Global, 10, None, None);
             assert_eq!(session.requests_total, 0, "new process session starts at 0");
             assert_eq!(global.requests_total, 1, "global survives restart");
         }

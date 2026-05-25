@@ -1,0 +1,36 @@
+# 示例：偏向端侧使用率（OpenClaw 稳定运行一段时间后）
+#
+# 在 config.toml 基础上:
+#   - economy profile（更高 θ_edge，更多请求走端）
+#   - 略提高 work 校验基线，配合 adaptive 在健康时自动下调
+#
+# 使用:
+#   flowy --config example/config.economy.toml gateway start
+#
+# 若回退率上升，flowy stats --lang zh 查看经验/自适应分区，或改回 balanced。
+
+[gateway]
+listen = "127.0.0.1:11080"
+route = "auto"
+routing_mode = "cascade"
+default_profile = "economy"
+ctx_edge_max_tokens = 65536
+
+experience_enabled = true
+experience_target_fallback = 0.15
+work_verify_sample_rate = 0.15
+
+adaptive_routing_enabled = true
+adaptive_min_verified_samples = 20
+adaptive_verify_rate_floor = 0.05
+adaptive_verify_rate_ceiling = 0.40
+adaptive_max_theta_shift = 0.05
+
+[upstream.edge]
+base_url = "http://127.0.0.1:11434/v1"
+
+[upstream.cloud]
+base_url = "https://api.deepseek.com/v1"
+# api_key = "sk-your-deepseek-api-key"
+
+[cli]

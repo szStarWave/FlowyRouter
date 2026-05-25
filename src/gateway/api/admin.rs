@@ -51,21 +51,28 @@ pub async fn stats(
     let _ = state.sessions.flush_if_dirty();
     let uptime = state.stats.session_uptime_secs();
     let experience = Some(state.experience.snapshot());
-    Ok(Json(state.stats.snapshot(scope, uptime, experience)))
+    let effective_routing = Some(state.adaptive_tuner.snapshot());
+    Ok(Json(state.stats.snapshot(
+        scope,
+        uptime,
+        experience,
+        effective_routing,
+    )))
 }
 
 pub async fn status(State(state): State<AppState>) -> Json<GatewayStatus> {
+    let config = state.config();
     Json(GatewayStatus {
         status: "running",
         version: env!("CARGO_PKG_VERSION"),
-        listen: state.config.listen_addr.clone(),
+        listen: config.listen_addr.clone(),
         pid: std::process::id(),
         uptime_secs: state.runtime.started_at.elapsed().as_secs(),
-        edge_configured: state.config.edge_base_url.is_some(),
-        cloud_configured: state.config.cloud_base_url.is_some(),
-        default_profile: profile_name(state.config.default_profile).to_string(),
-        pid_file: state.config.pid_file.display().to_string(),
-        data_dir: state.config.data_dir.display().to_string(),
+        edge_configured: config.edge_base_url.is_some(),
+        cloud_configured: config.cloud_base_url.is_some(),
+        default_profile: profile_name(config.default_profile).to_string(),
+        pid_file: config.pid_file.display().to_string(),
+        data_dir: config.data_dir.display().to_string(),
     })
 }
 
@@ -73,7 +80,7 @@ pub async fn shutdown(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Some(expected) = state.config.admin_token.as_ref() {
+    if let Some(expected) = state.config().admin_token.as_ref() {
         let provided = headers
             .get("x-flowy-admin-token")
             .and_then(|v| v.to_str().ok());

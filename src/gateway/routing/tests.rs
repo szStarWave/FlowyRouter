@@ -9,8 +9,9 @@ mod tests {
     use crate::gateway::config::AppConfig;
     use crate::gateway::experience::{ExperienceSettings, ExperienceStore, RequestOutcome};
     use crate::gateway::multimodal::MultimodalStore;
+    use crate::gateway::edge_load::EdgeInferenceTracker;
     use crate::gateway::routing::{
-        RouteTier, StepKind, decide, require_any_upstream,
+        EffectiveRouting, RouteTier, StepKind, decide, require_any_upstream,
     };
     use crate::gateway::session::SessionStore;
 
@@ -29,16 +30,36 @@ mod tests {
             file.upstream.edge = Some(UpstreamEndpoint {
                 base_url: "http://127.0.0.1:11434/v1".into(),
                 api_key: None,
+                model: None,
             });
         }
         if cloud {
             file.upstream.cloud = Some(UpstreamEndpoint {
                 base_url: "https://api.deepseek.com/v1".into(),
                 api_key: Some("test-key".into()),
+                model: None,
             });
         }
         AppConfig::from_file(file, std::path::PathBuf::from("/tmp/flowy-test-config.toml"))
             .unwrap()
+    }
+
+    fn decide_test(
+        config: &AppConfig,
+        req: &ChatCompletionRequest,
+        sessions: &SessionStore,
+        experience: Option<&ExperienceStore>,
+        multimodal: Option<&MultimodalStore>,
+    ) -> crate::gateway::routing::RouteDecision {
+        decide(
+            config,
+            req,
+            sessions,
+            experience,
+            multimodal,
+            &EffectiveRouting::passthrough(config),
+            None,
+        )
     }
 
     fn heartbeat_request() -> ChatCompletionRequest {
@@ -157,7 +178,7 @@ mod tests {
     fn simple_greeting_prefers_edge() {
         let cfg = test_config(true, true);
         let sessions = SessionStore::new_in_memory();
-        let decision = decide(
+        let decision = decide_test(
             &cfg,
             &simple_greeting_request(),
             &sessions,
@@ -177,7 +198,7 @@ mod tests {
     fn heartbeat_prefers_edge() {
         let cfg = test_config(true, true);
         let sessions = SessionStore::new_in_memory();
-        let decision = decide(
+        let decision = decide_test(
             &cfg,
             &heartbeat_request(),
             &sessions,
@@ -197,7 +218,7 @@ mod tests {
     fn edge_only_forces_edge_even_for_hard_tasks() {
         let cfg = test_config(true, false);
         let sessions = SessionStore::new_in_memory();
-        let decision = decide(
+        let decision = decide_test(
             &cfg,
             &complex_request(),
             &sessions,
@@ -276,7 +297,7 @@ mod tests {
     fn hermes_mid_loop_not_initial_plan() {
         let cfg = test_config(true, true);
         let sessions = SessionStore::new_in_memory();
-        let decision = decide(
+        let decision = decide_test(
             &cfg,
             &hermes_mid_loop_request(),
             &sessions,
@@ -347,7 +368,7 @@ mod tests {
     fn openclaw_system_docs_do_not_force_subagent_spawn() {
         let cfg = test_config(true, true);
         let sessions = SessionStore::new_in_memory();
-        let decision = decide(
+        let decision = decide_test(
             &cfg,
             &openclaw_time_question_request(),
             &sessions,
@@ -453,7 +474,7 @@ mod tests {
     fn initial_plan_forces_cloud() {
         let cfg = test_config(true, true);
         let sessions = SessionStore::new_in_memory();
-        let decision = decide(
+        let decision = decide_test(
             &cfg,
             &initial_plan_request(),
             &sessions,
@@ -480,7 +501,7 @@ mod tests {
     fn work_step_verify_cascade_without_experience() {
         let cfg = test_config(true, true);
         let sessions = SessionStore::new_in_memory();
-        let decision = decide(
+        let decision = decide_test(
             &cfg,
             &work_tool_select_request(),
             &sessions,
@@ -507,7 +528,7 @@ mod tests {
     fn work_step_skips_verify_at_zero_sample_rate() {
         let cfg = test_config_with_verify_rate(true, true, 0.0);
         let sessions = SessionStore::new_in_memory();
-        let decision = decide(
+        let decision = decide_test(
             &cfg,
             &work_tool_select_request(),
             &sessions,
@@ -545,7 +566,7 @@ mod tests {
             );
         }
 
-        let decision = decide(
+        let decision = decide_test(
             &cfg,
             &work_tool_select_request(),
             &sessions,
@@ -571,7 +592,7 @@ mod tests {
     fn multimodal_simple_chat_tries_edge() {
         let cfg = test_config(true, true);
         let sessions = SessionStore::new_in_memory();
-        let decision = decide(
+        let decision = decide_test(
             &cfg,
             &simple_image_request(),
             &sessions,
@@ -600,7 +621,7 @@ mod tests {
     fn multimodal_edge_only_stays_edge() {
         let cfg = test_config(true, false);
         let sessions = SessionStore::new_in_memory();
-        let decision = decide(
+        let decision = decide_test(
             &cfg,
             &simple_image_request(),
             &sessions,
@@ -659,7 +680,7 @@ mod tests {
         let store = test_multimodal_store();
         store.record_edge(&cfg, "flowy-auto", true);
 
-        let decision = decide(
+        let decision = decide_test(
             &cfg,
             &complex_image_with_tools_request(),
             &sessions,
@@ -698,7 +719,7 @@ mod tests {
         store.record_edge(&cfg, "flowy-auto", false);
         store.record_cloud(&cfg, "flowy-auto", true);
 
-        let decision = decide(
+        let decision = decide_test(
             &cfg,
             &simple_image_request(),
             &sessions,
@@ -721,7 +742,7 @@ mod tests {
     fn cloud_only_forces_cloud() {
         let cfg = test_config(false, true);
         let sessions = SessionStore::new_in_memory();
-        let decision = decide(
+        let decision = decide_test(
             &cfg,
             &simple_greeting_request(),
             &sessions,
@@ -736,6 +757,34 @@ mod tests {
         );
         assert!(
             decision.reason_codes.iter().any(|c| c == "UPSTREAM_CLOUD_ONLY"),
+            "{:?}",
+            decision.reason_codes
+        );
+    }
+
+    #[test]
+    fn edge_busy_routes_cloud_when_edge_inference_active() {
+        let cfg = test_config(true, true);
+        let sessions = SessionStore::new_in_memory();
+        let tracker = EdgeInferenceTracker::new();
+        let _guard = tracker.begin();
+        let decision = decide(
+            &cfg,
+            &heartbeat_request(),
+            &sessions,
+            None,
+            None,
+            &EffectiveRouting::passthrough(&cfg),
+            Some(tracker.as_ref()),
+        );
+        assert!(
+            matches!(decision.route, RouteTier::Cloud),
+            "expected cloud when edge busy, got {:?} {:?}",
+            decision.route,
+            decision.reason_codes
+        );
+        assert!(
+            decision.reason_codes.iter().any(|c| c == "GATE_EDGE_BUSY"),
             "{:?}",
             decision.reason_codes
         );

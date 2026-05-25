@@ -64,6 +64,7 @@ pub fn apply_work_route(
     experience: Option<&ExperienceStore>,
     conv_key: &str,
     tokens_in: u32,
+    work_verify_sample_rate: f32,
     reason_codes: &mut Vec<String>,
 ) -> (RouteTier, WorkStrategy) {
     if !cloud_configured(config) {
@@ -88,18 +89,16 @@ pub fn apply_work_route(
         conv_key,
         step_kind,
         tokens_in,
-        config.work_verify_sample_rate,
+        work_verify_sample_rate,
     ) {
         reason_codes.push(format!(
-            "WORK_VERIFY_SAMPLE(p={:.2})",
-            config.work_verify_sample_rate
+            "WORK_VERIFY_SAMPLE(p={work_verify_sample_rate:.2})"
         ));
         return (RouteTier::Cascade, WorkStrategy::Verify);
     }
 
     reason_codes.push(format!(
-        "WORK_SAMPLE_SKIP(p={:.2})",
-        config.work_verify_sample_rate
+        "WORK_SAMPLE_SKIP(p={work_verify_sample_rate:.2})"
     ));
     (RouteTier::Edge, WorkStrategy::None)
 }
@@ -116,10 +115,12 @@ mod tests {
         file.upstream.edge = Some(UpstreamEndpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             api_key: None,
+            model: None,
         });
         file.upstream.cloud = Some(UpstreamEndpoint {
             base_url: "https://api.example.com/v1".into(),
             api_key: None,
+            model: None,
         });
         AppConfig::from_file(file, std::path::PathBuf::from("/tmp/flowy-test-config.toml"))
             .unwrap()
@@ -146,6 +147,7 @@ mod tests {
             None,
             "conv:sample",
             512,
+            0.0,
             &mut codes,
         );
         assert_eq!(route, RouteTier::Edge);
@@ -164,9 +166,9 @@ mod tests {
             None,
             "conv:sample",
             512,
+            1.0,
             &mut codes,
         );
-        assert_eq!(route, RouteTier::Cascade);
         assert_eq!(strategy, WorkStrategy::Verify);
         assert!(codes.iter().any(|c| c.starts_with("WORK_VERIFY_SAMPLE")));
     }

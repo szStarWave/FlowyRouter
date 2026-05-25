@@ -54,7 +54,6 @@ pub async fn start_daemon(client: &GatewayClient, settings: &CliSettings, wait_s
         .arg("--config")
         .arg(&settings.config_path)
         .arg("__serve")
-        .arg("--daemon")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -69,21 +68,6 @@ pub async fn start_daemon(client: &GatewayClient, settings: &CliSettings, wait_s
         );
     } else {
         println!("gateway started at {}", client.base_url());
-    }
-    Ok(())
-}
-
-pub async fn run_foreground(settings: &CliSettings) -> Result<()> {
-    let bin = resolve_gateway_bin()?;
-    let status = Command::new(&bin)
-        .arg("--config")
-        .arg(&settings.config_path)
-        .arg("__serve")
-        .arg("--foreground")
-        .status()
-        .context("run flowy __serve --foreground")?;
-    if !status.success() {
-        bail!("gateway exited with {status}");
     }
     Ok(())
 }

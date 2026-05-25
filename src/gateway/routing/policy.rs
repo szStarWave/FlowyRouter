@@ -50,6 +50,18 @@ pub fn map_policy(
     profile: Profile,
     mode: RoutingMode,
 ) -> RouteTier {
+    let (theta_edge, theta_cloud) = profile.thresholds();
+    map_policy_with_thresholds(d, step_kind, profile, mode, theta_edge, theta_cloud)
+}
+
+pub fn map_policy_with_thresholds(
+    d: DifficultyScore,
+    step_kind: StepKind,
+    profile: Profile,
+    mode: RoutingMode,
+    theta_edge: f32,
+    theta_cloud: f32,
+) -> RouteTier {
     if matches!(step_kind, StepKind::HeartbeatAck | StepKind::DirectChat) {
         return RouteTier::Edge;
     }
@@ -61,7 +73,6 @@ pub fn map_policy(
         return RouteTier::Edge;
     }
 
-    let (theta_edge, theta_cloud) = profile.thresholds();
     let score = d.0;
 
     match mode {

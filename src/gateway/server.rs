@@ -13,6 +13,7 @@ use tracing::info;
 use crate::gateway::api::router;
 use crate::gateway::api::routes::AppState;
 use crate::gateway::config::AppConfig;
+use crate::gateway::config_manager::ConfigManager;
 use crate::gateway::daemon;
 use crate::config::sessions_dir;
 
@@ -20,6 +21,8 @@ use crate::gateway::experience::ExperienceStore;
 use crate::gateway::multimodal::MultimodalStore;
 use crate::gateway::session::SessionStore;
 use crate::gateway::stats::GatewayStats;
+use crate::gateway::edge_load::EdgeInferenceTracker;
+use crate::gateway::routing::{AdaptiveTuner, compute_effective_routing};
 use crate::gateway::upstream::UpstreamClient;
 
 pub struct GatewayRuntime {
@@ -70,14 +73,29 @@ pub async fn run(config: AppConfig, register_pid: bool) -> anyhow::Result<()> {
     let experience_for_shutdown = experience.clone();
     let multimodal_for_shutdown = multimodal.clone();
     let multimodal_for_upstream = multimodal.clone();
+    let initial_routing = {
+        let exp = experience.snapshot();
+        let stats_data = stats.global_data();
+        compute_effective_routing(&config, &exp, Some(&stats_data), &config.adaptive_routing)
+    };
+    let adaptive_tuner = Arc::new(AdaptiveTuner::new(initial_routing));
+    let edge_load = EdgeInferenceTracker::new();
+    let config_mgr = ConfigManager::new(config.clone());
     let state = AppState {
-        config: config.clone(),
+        config_mgr: config_mgr.clone(),
         sessions,
         experience,
         multimodal,
-        upstream: UpstreamClient::new(config.clone(), stats.clone(), multimodal_for_upstream),
+        upstream: UpstreamClient::new(
+            config_mgr,
+            stats.clone(),
+            multimodal_for_upstream,
+            edge_load.clone(),
+        ),
         runtime: runtime.clone(),
         stats: stats.clone(),
+        adaptive_tuner,
+        edge_load,
     };
 
     let app = router(state)

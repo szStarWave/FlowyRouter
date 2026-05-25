@@ -1,8 +1,46 @@
 # Flowy Router
 
-端云 LLM 智能路由：**单一 `flowy` 可执行文件** — CLI 管理命令与 Gateway 守护进程合并在同一二进制中。Agent（OpenClaw、Hermes 等）将 OpenAI 兼容 `base_url` 指向 Gateway 即可。
+端云 LLM 智能路由：**单一 `flowy` 可执行文件** — CLI 管理命令与 Gateway 守护进程合并在同一二进制中。Agent（OpenClaw、Hermes 等）将 OpenAI 兼容 `base_url` 指向 Gateway 即可，在 Agent 行为不变的前提下降低云端 **输入 Token** 成本。
 
-产品说明见 [prd.md](./prd.md)。
+---
+
+## 产品概述
+
+### 背景
+
+自主 Agent（如 [OpenClaw](https://github.com/openclaw/openclaw)、[Hermes Agent](https://github.com/NousResearch/hermes-agent)）在一次用户意图下往往触发 **多轮 LLM 推理**：ReAct 循环中每一步都是独立的 Chat Completions 请求，且每步都会重发 **完整 system + 全历史 + 工具 schema**。
+
+实测（OpenClaw 类负载）单次请求约 **52,830 输入 Token / 357 输出 Token**，输入占比 **99%+**。因此 Flowy 的首要优化目标是 **少把巨型 prompt 送进云端计价模型**，而非压缩输出。
+
+端侧小模型 / MoE（如 Qwen3.5-35B-A3B）适合 Agent 循环中的轻推理步骤；云端旗舰模型保留给规划、复杂工具链、长文档理解等。
+
+### 定位
+
+| 维度 | 说明 |
+|------|------|
+| **是什么** | Agent 专用的 OpenAI 兼容模型代理：端云统一接入 + 按 **Inference Step** 粒度的路由 + 成本/质量可观测 |
+| **主要服务对象** | OpenClaw、Hermes 及同类「自带 Gateway + Agentic Loop + 可配置 OpenAI-compatible endpoint」的运行时 |
+| **不是什么** | 不是 Agent 本体（不负责工具执行、记忆、消息渠道） |
+| **核心价值** | 在可控质量下减少云端输入 Token 次数与体量 |
+
+### Agent 集成示意
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────────┐
+│ OpenClaw /      │     │  Flowy Router    │     │ Edge（Ollama 等）    │
+│ Hermes Gateway  │────►│  逐请求路由       │────►│ 或                  │
+│ Agentic Loop    │     │  base_url 替换    │     │ Cloud（DeepSeek 等） │
+└─────────────────┘     └──────────────────┘     └─────────────────────┘
+```
+
+| 职责 | Agent | Flowy Router |
+|------|-------|--------------|
+| 工具执行、记忆、Skills | ✅ | ❌ |
+| 单次 LLM 调用的端/云选择 | ❌ | ✅ |
+| 端侧低质量时的 Cascade / Fallback | ❌ | ✅ |
+| 路由与 Token 统计 | 可选 | ✅ |
+
+---
 
 ## 架构
 
@@ -10,12 +48,32 @@
 ┌─────────────────────────────────────────────────────────────┐
 │  flowy（单一二进制）                                          │
 │    flowy gateway start  →  后台 re-exec 自身为 HTTP 守护进程   │
-│    flowy env / stats / gateway status  →  CLI 管理           │
+│    flowy env / stats / setup / gateway status  →  CLI 管理   │
 └───────────────────────────────┬─────────────────────────────┘
                                 │
                     OpenClaw / Hermes ────────┘
                     POST /v1/chat/completions
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        ▼                       ▼                       ▼
+  Hard Gates            Difficulty + Policy      Experience + Adaptive
+  (强制云/端)            (Profile / Cascade)       (运行时微调)
+        │                       │                       │
+        └───────────────────────┴───────────────────────┘
+                                ▼
+                    Edge Runtime / Cloud Adapter
 ```
+
+**路由决策流水线**（每次 `POST /v1/chat/completions`）：
+
+1. **硬约束层** — 命中则直接定路由，不算分（上下文溢出、InitialPlan、复杂多模态、高危工具、assistant 失败恢复、cloud sticky 等）
+2. **信号提取** — 从 `messages[]` / `tools[]` 提取 token 估算、步态 `step_kind`、会话状态
+3. **难度评分** — 可解释加权公式 \(d \in [0,1]\)，叠加经验偏置 `EXP_BIAS`
+4. **策略映射** — Profile 的 `θ_edge` / `θ_cloud` + `routing_mode` → edge / cloud / cascade
+5. **Work 步态校验** — ToolSelect 等可抽样走 edge+cloud 验证（`work_verify_sample_rate`）
+6. **自适应层**（可选）— 根据 `experience.json` + `stats.json` 运行时微调校验率与阈值（不写回配置）
+
+> **重要**：路由 **不读取** 请求头上的 `X-Flowy-*`；步态与难度仅由请求体与 `config.toml` 推断。响应可带 `flowy_meta`（JSON）或 `X-Flowy-*` 响应头（流式）供调试。
 
 ---
 
@@ -27,42 +85,37 @@
 git clone <your-repo-url> flowy-router
 cd flowy-router
 cargo build --release
+# 或
+make release
 ```
-
-编译产物：
 
 | 二进制 | 路径 |
 |--------|------|
 | flowy | `target/release/flowy` |
 
-**加入 PATH（推荐）**
+**加入 PATH**
 
 ```bash
-# Linux / macOS
 export PATH="$PWD/target/release:$PATH"
-
-# 或复制到已有目录
+# 或
+make install
 cp target/release/flowy ~/.local/bin/
 ```
 
-**Windows（PowerShell）**
+**Windows（PowerShell）**：`$env:Path += ";$PWD\target\release"`
 
-```powershell
-$env:Path += ";$PWD\target\release"
-```
-
-未安装到 PATH 时，可用 `cargo run`（开发调试）：
+开发调试可用 `cargo run -- gateway start` 或 `make start`：
 
 ```bash
-cargo run -- gateway start
-cargo run -- gateway run
+make start
+# 等价于 flowy gateway start
 ```
 
 ---
 
-## 2. 配置文件（TOML）
+## 2. 配置文件
 
-所有业务配置写在 **TOML** 文件中，不使用 `FLOWY_*` 环境变量。端/云/级联路由**仅由 `config.toml` + 请求体**决定，**禁止**用 `X-Flowy-*` 等 chat 请求头参与判断。
+所有业务配置写在 **TOML** 中，不使用 `FLOWY_*` 环境变量（日志级别除外：`RUST_LOG=flowy_router=debug`）。
 
 | 系统 | 配置路径 |
 |------|----------|
@@ -71,277 +124,241 @@ cargo run -- gateway run
 
 ```
 ~/.flowy-router/
-  config.toml      # 主配置（Gateway + 上游 + CLI）
-  gateway.pid      # 守护进程 PID（运行时）
-  stats.json       # 路由/流量累计统计（持久化）
-  experience.json  # 按 step_kind 的隐式路由经验
-  sessions/        # 每会话状态（含 cloud_sticky）
-  logs/gateway.log # Gateway 日志（追加）
+  config.toml       # 主配置
+  gateway.pid       # 守护进程 PID
+  stats.json        # 路由/流量累计统计（持久化）
+  experience.json   # 按 step_kind 的隐式路由经验
+  sessions/         # 每会话状态（含 cloud_sticky）
+  logs/gateway.log  # Gateway 日志
 ```
 
-**示例文件**（仓库内，可复制或 `--config` 引用）：
+**示例配置**
 
 | 文件 | 用途 |
 |------|------|
 | [example/config.toml](./example/config.toml) | 推荐：Ollama + DeepSeek，`route = auto` |
+| [example/config.economy.toml](./example/config.economy.toml) | 提高端侧占比：`economy` + 自适应 |
 | [example/config.edge-only.toml](./example/config.edge-only.toml) | 固定端侧 |
-| [example/config.minimal.toml](./example/config.minimal.toml) | 最小模板（须至少配一侧上游才能聊天） |
+| [example/config.minimal.toml](./example/config.minimal.toml) | 最小模板 |
 
 ```bash
-# 方式 A：复制为默认配置
 mkdir -p ~/.flowy-router
+flowy setup                    # 交互式填写云端/端侧配置
+# 或复制示例后编辑
 cp example/config.toml ~/.flowy-router/config.toml
-# 编辑 upstream 的 base_url 等（api_key 均为选填）
 
-# 方式 B：指定路径启动（不复制）
+# 或指定路径
+flowy --config example/config.toml setup
 flowy --config example/config.toml gateway start
+make setup CONFIG=example/config.toml
+make start CONFIG=example/config.toml
 ```
 
-首次 `flowy gateway start` 时若 `config.toml` 不存在，会自动写入默认模板（同 `example/config.minimal.toml` 结构）。
-
-日志级别（仅此一项可用环境变量）：`RUST_LOG=flowy_router=debug flowy gateway run`
+首次 `flowy gateway start` 时若 `config.toml` 不存在，会自动写入默认模板。
 
 ---
 
-## 3. 使用流程（从零到 Agent 接入）
+## 3. 使用流程
 
-### 3.1 启动 Gateway（自动初始化配置）
+### 3.1 启动 Gateway
 
 ```bash
 flowy gateway start
+# 或 make start
 ```
 
-首次启动会看到类似提示：
+首次启动示例输出：
 
 ```text
 Created config at /home/you/.flowy-router/config.toml — edit upstream sections, then restart if needed.
-gateway started (pid 12345, listen 127.0.0.1:8080, profile balanced)
+gateway started (pid 12345, listen 127.0.0.1:11080, profile balanced)
 ```
 
-### 3.2 编辑配置
+### 3.2 初始化上游（setup）
 
-以 [example/config.toml](./example/config.toml) 为模板，至少配置一侧上游的 `base_url`（`api_key` 均为选填，按上游服务需要填写）。改完后：
+```bash
+flowy setup                                          # 交互式向导（默认）
+flowy setup --cloud-url https://api.deepseek.com/v1 --cloud-key sk-...  # 非交互
+flowy setup --edge-url http://127.0.0.1:11434/v1 --edge-model qwen3
+flowy setup --remote                                 # 交互式，热更新运行中的 Gateway
+flowy setup --non-interactive                        # 仅写入默认模板（cloud model=auto，edge 空）
+flowy setup --reset                                    # 恢复默认（cloud model=auto，edge 清空）
+flowy setup --json                                     # JSON 输出（跳过交互）
+```
+
+**Web 配置页**：浏览器打开 `http://127.0.0.1:11080/setup`（地址与 `gateway.listen` 一致）。页面可查看/保存端侧与云端 URL、模型、API Key；若配置了 `admin_token`，保存与「恢复默认」需在页面填写 Admin Token（等同请求头 `X-Flowy-Admin-Token`）。
+
+默认值：**云端** `model = auto`（转发时保留客户端请求的 model，由 Flowy 路由）；**端侧** 未配置（`edge` 段为空）。
+
+### 3.3 编辑配置并重启
+
+至少配置一侧上游的 `base_url`（可用 `flowy setup` 或 Web 页，或手改 `config.toml`）。本地改文件后：
 
 ```bash
 flowy gateway restart
-flowy env    # 核对 route、上游是否 configured
+flowy env
 ```
 
-**上游可用性**：`[upstream.edge]` 与 `[upstream.cloud]` 至少配置一侧，否则 `POST /v1/chat/completions` 返回 **503**。只配端侧时全部走端侧；只配云端时全部走云端；两侧都配时按 `route` / 难度 / 级联策略路由。
+**上游可用性**：`[upstream.edge]` 与 `[upstream.cloud]` 至少配置一侧，否则聊天接口返回 **503**。
 
-### 3.3 查看状态
+### 3.4 查看状态
 
 ```bash
 flowy gateway status
+make gateway-status
 ```
 
-```text
-Flowy Gateway
-  Status:   running
-  Version:  0.1.0
-  PID:      12345
-  Listen:   127.0.0.1:8080
-  Uptime:   42s
-  Edge:     configured
-  Cloud:    configured
-  Profile:  balanced
-  ...
-```
+**停止 / 重启**：`flowy gateway stop [--force]`、`flowy gateway restart`
 
-**开发时前台运行**（日志直接打在终端，不写 pid 文件）：
+日志写入 `~/.flowy-router/logs/gateway.log`；调试时可 `tail -f` 该文件。
+
+### 3.5 curl 验证
 
 ```bash
-flowy gateway run
-# 等价于: flowy --config ~/.flowy-router/config.toml __serve --foreground
-```
+curl -s http://127.0.0.1:11080/health
 
-**停止 / 重启**
-
-```bash
-flowy gateway stop
-flowy gateway stop --force    # 进程无响应时强制结束
-flowy gateway restart
-```
-
-### 3.4 用 curl 验证路由（与 Agent 相同协议）
-
-```bash
-curl -s http://127.0.0.1:8080/health
-
-curl -s http://127.0.0.1:8080/v1/chat/completions \
+curl -s http://127.0.0.1:11080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "flowy-auto",
-    "messages": [
-      {"role": "user", "content": "[OpenClaw heartbeat poll]"}
-    ]
+    "messages": [{"role": "user", "content": "[OpenClaw heartbeat poll]"}]
   }' | jq '.flowy_meta'
 ```
 
-**流式**（`stream: true`，SSE）：
+流式：`"stream": true`，响应头含 `X-Flowy-Route`、`X-Flowy-Step-Kind` 等。
 
-```bash
-curl -sN http://127.0.0.1:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "flowy-auto",
-    "stream": true,
-    "messages": [{"role": "user", "content": "hello"}]
-  }'
-# 响应头含 X-Flowy-Route、X-Flowy-Step-Kind 等；body 为 data: {...}\n\n 与 data: [DONE]\n\n
-```
+若配置了 `gateway.api_key`，须加 `-H "Authorization: Bearer <key>"`。
 
-响应中的 **`flowy_meta`**（非流式 JSON）或 **`X-Flowy-*` 响应头**（流式）含 `route`、`difficulty_score`、`step_kind`、`reason_codes` 等路由信息。
+### 3.6 接入 OpenClaw
 
-若已配置 `gateway.api_key`，curl 需增加：`-H "Authorization: Bearer <your-key>"`。
-
-路由策略见下文 [§7 配置文件说明](#7-配置文件说明)。
-
-> **路由不读取** `POST /v1/chat/completions` 上的 `X-Flowy-*` 请求头；步态与难度仅由 `messages[]`、`tools[]` 与 `config.toml` 推断。响应仍可带 `X-Flowy-Route` 等（只读）。
-
-> 支持 `stream=true`（SSE）与 `stream=false`（JSON）。**所有 `api_key` 均为选填**：未配置 `gateway.api_key` 时不校验入站请求；配置后客户端须带 `Authorization: Bearer <key>` 或 `x-api-key: <key>`。若配置了 `[upstream.*].api_key`，Gateway 转发时附带 `Authorization: Bearer`。
-
-### 3.5 接入 OpenClaw
-
-编辑 `~/.openclaw/openclaw.json`（路径以 OpenClaw 文档为准），将 provider 指向 Flowy：
+编辑 `~/.openclaw/openclaw.json`：
 
 ```json
 {
   "models": {
     "providers": {
       "flowy": {
-        "baseUrl": "http://127.0.0.1:8080/v1",
+        "baseUrl": "http://127.0.0.1:11080/v1",
         "apiKey": "",
-        "models": [
-          { "id": "flowy-auto", "name": "Flowy Auto Route" }
-        ]
+        "models": [{ "id": "flowy-auto", "name": "Flowy Auto Route" }]
       }
     }
   }
 }
 ```
 
-- `baseUrl` 须与 `config.toml` 中 `gateway.listen` 一致（默认 `http://127.0.0.1:8080/v1`）。
-- `apiKey` 选填：仅当配置了 `gateway.api_key` 时须与之一致；未配置时可留空或任意占位。
-- 在 OpenClaw 里选用 `flowy-auto`（或你配置的 model id）。
+- `baseUrl` 须与 `gateway.listen` 一致
+- `apiKey` 选填：仅当配置了 `gateway.api_key` 时须一致
 
-### 3.6 接入 Hermes
+### 3.7 接入 Hermes
 
 ```bash
 # hermes setup model → Custom OpenAI-compatible endpoint
-# base_url: http://127.0.0.1:8080/v1
-# api_key:  选填；仅当 gateway.api_key 已配置时需一致
-```
-
-Hermes/OpenClaw 无需也不应通过请求头影响路由。
-
----
-
-## 4. 指定其它配置文件
-
-调试或多环境时，CLI 与 Gateway 守护进程必须使用 **同一份** `config.toml`（`flowy gateway start` 会以 re-exec 方式启动同一 `flowy` 二进制）：
-
-```bash
-flowy --config /path/to/dev.toml gateway start
-flowy --config /path/to/dev.toml gateway status
+# base_url: http://127.0.0.1:11080/v1
 ```
 
 ---
 
-## 5. CLI 命令速查
+## 4. CLI 命令
 
 | 命令 | 说明 |
 |------|------|
-| `flowy gateway start [--wait N]` | 后台启动；首次会创建配置目录与 `config.toml` |
+| `flowy setup [--remote] [--non-interactive] [--reset] [--json]` | 交互式配置上游（或 CLI 参数非交互） |
+| `flowy gateway start [--wait N]` | 后台启动 |
 | `flowy gateway stop [--force]` | 停止 |
 | `flowy gateway status [--json]` | 运行状态 |
 | `flowy gateway restart [--wait N]` | 重启 |
-| `flowy gateway run` | 前台运行（开发） |
-| `flowy env [--json]` | 打印路径、解析后的配置与运行时环境变量 |
-| `flowy stats [--json]` | **当前 gateway 进程**的路由与流量统计（本次启动以来） |
-| `flowy stats --global [--json]` | **全部历史**累计统计（`stats.json`，跨重启；gateway 未运行时也可读盘） |
+| `flowy env [--json]` | 路径与解析后的配置 |
+| `flowy stats [--json] [--lang en\|zh]` | **当前进程**会话统计 |
+| `flowy stats --global [--json] [--lang en\|zh]` | **全部历史**（`stats.json`，gateway 未运行也可读盘） |
 
-全局参数：`--config <path>`。调试 HTTP 可用 `curl`（见 §3.4）。
+全局参数：`--config <path>`
 
-查看路径与配置（不启动 Gateway、不创建 `config.toml`）：
+**Makefile 快捷目标**：`make help`、`make test`、`make setup`、`make stats`、`make stats-zh`、`make stats-global-zh`
 
 ```bash
-flowy env
-flowy env --json
-flowy stats              # 当前运行会话
-flowy stats --global     # 全部历史（含以往 gateway 运行）
-flowy stats --json
-flowy stats --global --json
+flowy stats --lang zh          # 中文格式化输出
+flowy stats --global --lang zh # 全局累计 + 中文
 ```
 
-`flowy env` 示例输出：
-
-```text
-Paths
-  user_home:      /home/you
-  app_dir:        /home/you/.flowy-router
-  config_file:    /home/you/.flowy-router/config.toml (exists)
-  pid_file:       /home/you/.flowy-router/gateway.pid
-  sessions_dir:   /home/you/.flowy-router/sessions
-  gateway_pid:    12345
-  gateway_bin:    /home/you/flowy-router/target/release/flowy
-
-Config (from config.toml or defaults if missing)
-  gateway_listen:       127.0.0.1:8080
-  gateway_url:          http://127.0.0.1:8080
-  ...
-Runtime environment
-  RUST_LOG:       (not set)
-```
+`flowy stats` 输出包含：请求量、路由分布、上游 Token（输入/输出/缓存）、Cloud Input Saved、延迟（TTFT/TPS）、经验学习、**自适应路由（运行时）** 等分区。
 
 ---
 
-## 6. HTTP 端点
+## 5. HTTP 端点
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
+| `GET` | `/setup` | 上游配置 Web 页（浏览器） |
+| `GET` | `/v1/admin/setup` | 当前上游 JSON（edge/cloud URL、model、key 是否已设） |
+| `POST` | `/v1/admin/setup` | 更新上游；热生效；可选 `X-Flowy-Admin-Token` |
+| `POST` | `/v1/admin/setup/init` | 恢复默认（cloud model=auto，edge 空）；可选 Admin Token |
 | `GET` | `/health` | 存活与上游是否已配置 |
-| `GET` | `/v1/admin/status` | 守护进程详情（同 `flowy gateway status` 数据源） |
-| `GET` | `/v1/admin/stats` | 当前会话统计（`scope=session`，默认）；`?scope=global` 为全部历史（同 `flowy stats --global`） |
-| `POST` | `/v1/admin/shutdown` | 优雅关闭；若配置了 `gateway.admin_token`，需 Header `X-Flowy-Admin-Token` |
+| `GET` | `/v1/admin/status` | 守护进程详情 |
+| `GET` | `/v1/admin/stats` | 统计；`?scope=global` 为全部历史 |
+| `POST` | `/v1/admin/shutdown` | 优雅关闭；可选 `X-Flowy-Admin-Token` |
 | `POST` | `/v1/chat/completions` | OpenAI 兼容聊天（Agent 主入口） |
+
+**响应扩展**（非流式 JSON 中的 `flowy_meta`）：
+
+```json
+{
+  "flowy_meta": {
+    "route": "edge",
+    "fallback": false,
+    "difficulty_score": 0.32,
+    "step_kind": "heartbeat_ack",
+    "reason_codes": ["STEP_HEARTBEAT", "POLICY_EDGE"],
+    "tokens_in": 42000,
+    "tokens_out": 12,
+    "cloud_input_saved": 42000,
+    "profile": "balanced"
+  }
+}
+```
 
 ---
 
-## 7. 配置文件说明
+## 6. 配置字段说明
 
-完整示例与注释见 [example/config.toml](./example/config.toml)。
+完整示例见 [example/config.toml](./example/config.toml)。
 
-### 7.1 `[gateway]`
+### 6.1 `[gateway]`
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `listen` | string | `127.0.0.1:8080` | Gateway 监听地址；Agent 的 `baseUrl` = `http://{listen}/v1` |
-| `route` | string | `auto` | 见下表 |
-| `routing_mode` | string | `cascade` | 仅 `route=auto` 时生效，见下表 |
-| `default_profile` | string | `balanced` | `economy` / `balanced` / `premium` / `privacy` |
-| `ctx_edge_max_tokens` | u32 | `65536` | 端侧上下文 token 上限估算 |
-| `api_key` | string? | — | **选填**；配置后入站 `POST /v1/chat/completions` 须带相同密钥 |
-| `admin_token` | string? | — | **选填**；配置后 `POST /v1/admin/shutdown` 需头 `X-Flowy-Admin-Token` |
-| `experience_enabled` | bool | `true` | 按 `step_kind` 隐式学习，微调难度分 |
-| `experience_learning_rate` | float | `0.08` | 经验偏置学习强度 |
-| `experience_max_bias` | float | `0.12` | 单步态难度偏置上限 |
-| `experience_target_fallback` | float | `0.15` | 级联升云「目标」比例 |
-| `cloud_sticky_ttl_secs` | u64 | `600` | 升云后会话粘性 TTL（秒） |
-| `session_persist_enabled` | bool | `true` | 会话状态写入 `sessions/` |
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `listen` | `127.0.0.1:11080` | 监听地址；Agent `baseUrl` = `http://{listen}/v1` |
+| `route` | `auto` | `auto` / `edge` / `cloud` / `cascade` |
+| `routing_mode` | `cascade` | 仅 `route=auto`：`single` / `cascade` / `split` |
+| `default_profile` | `balanced` | `economy` / `balanced` / `premium` / `privacy` |
+| `ctx_edge_max_tokens` | `65536` | 端侧上下文上限；超过约 80% 触发 `GATE_CTX_OVERFLOW` |
+| `api_key` | — | 选填；入站鉴权 |
+| `admin_token` | — | 选填；保护 shutdown 与 setup 写操作 |
+| `experience_enabled` | `true` | 按 `step_kind` 隐式学习 |
+| `experience_learning_rate` | `0.08` | 经验偏置学习强度 |
+| `experience_max_bias` | `0.12` | 单步态难度偏置上限 |
+| `experience_target_fallback` | `0.15` | 级联升云目标比例（自适应路由参考） |
+| `cloud_sticky_ttl_secs` | `600` | 升云后会话粘性 TTL |
+| `session_persist_enabled` | `true` | 会话写入 `sessions/` |
+| `work_verify_sample_rate` | `0.1` | Work 步态云端校验抽样率（0–1） |
+| `adaptive_routing_enabled` | `true` | 运行时自适应微调（见 §7.3） |
+| `adaptive_min_verified_samples` | `20` | 预热期：云验证样本不足时用配置基线 |
+| `adaptive_verify_rate_floor` | `0.05` | 校验率下限 |
+| `adaptive_verify_rate_ceiling` | `0.45` | 校验率上限 |
+| `adaptive_max_theta_shift` | `0.05` | 健康时 θ 最大放宽幅度 |
 
-#### `gateway.route`（总开关）
+#### `gateway.route`
 
 | 值 | 行为 |
 |----|------|
-| `auto` | 按请求难度 + `default_profile` + `routing_mode` 选择 edge / cloud / cascade |
-| `edge` | 每个请求走端侧；端未配置或不可用时降级 cloud |
-| `cloud` | 每个请求走云端 |
-| `cascade` | 每个请求先端侧，质量不过关再升云 |
+| `auto` | 按难度 + profile + routing_mode 选择 |
+| `edge` | 全部端侧；不可用则降级 cloud |
+| `cloud` | 全部云端 |
+| `cascade` | 每请求先 edge，质量不过关再升 cloud |
 
 #### `gateway.routing_mode`（仅 `route = auto`）
 
-结合 `balanced` profile 的阈值（约 θ_edge=0.35、θ_cloud=0.55）：
+结合 `balanced` profile（约 θ_edge=0.35、θ_cloud=0.55）：
 
 | 值 | 难度低 | 难度中 | 难度高 |
 |----|--------|--------|--------|
@@ -349,104 +366,196 @@ Runtime environment
 | `cascade` | edge | **先 edge，可能升 cloud** | cloud |
 | `split` | cloud | cloud | cloud |
 
-> `route = cascade` 与 `routing_mode = cascade` 不同：前者强制每请求级联；后者只在 auto 模式下对「中等难度」启用级联。
-
-#### `default_profile`（仅 `route = auto`）
-
-影响难度阈值，越「省钱」越倾向 edge：
+#### `default_profile`
 
 | Profile | θ_edge | θ_cloud | 说明 |
 |---------|--------|---------|------|
 | `economy` | 0.40 | 0.60 | 更多走端 |
 | `balanced` | 0.35 | 0.55 | 默认 |
 | `premium` | 0.25 | 0.45 | 更多走云 |
-| `privacy` | — | — | 尽量 edge（恢复失败等除外） |
+| `privacy` | — | — | 尽量 edge |
 
-### 7.2 `[upstream.edge]` / `[upstream.cloud]`
+### 6.2 `[upstream.edge]` / `[upstream.cloud]`
 
 | 字段 | 说明 |
 |------|------|
-| `base_url` | OpenAI 兼容 API 根路径，**须含 `/v1`**，如 `http://127.0.0.1:11434/v1` |
-| `api_key` | **选填**；配置后 Gateway 转发该上游时附带 `Authorization: Bearer` |
+| `base_url` | OpenAI 兼容 API 根路径，**须含 `/v1`**；空表示未配置 |
+| `api_key` | 选填；转发时附带 `Authorization: Bearer` |
+| `model` | 选填；上游模型 id。云端默认 `auto` = 不覆盖客户端 model；端侧通常填具体模型名 |
 
-至少配置一侧才能处理聊天请求。只配 `[upstream.edge]` 时，无论路由策略如何，请求均转发到端侧；只配 `[upstream.cloud]` 时全部走云端；两侧都省略则聊天接口报错（`GET /health` 仍可用）。
+至少配置一侧。只配 edge 时全部走端侧；只配 cloud 时全部走云端。
 
-### 7.3 `[cli]`
+### 6.3 `[cli]`
 
 | 字段 | 说明 |
 |------|------|
 | `gateway_url` | CLI 访问 Gateway 的 URL，默认 `http://{gateway.listen}` |
 
-### 7.4 常用组合
+### 6.4 常用组合
 
 ```toml
-# 智能路由 + 级联（默认推荐，OpenClaw）
+# 智能路由 + 级联（OpenClaw 推荐）
 route = "auto"
 routing_mode = "cascade"
 default_profile = "balanced"
 
-# 全部本地 Ollama
+# 全部本地
 route = "edge"
 
-# 全部 DeepSeek 云端
+# 全部云端
 route = "cloud"
 
-# 寒暄也想走端：固定端或提高 edge 阈值
-route = "edge"
-# 或 route = "auto" + default_profile = "economy" + routing_mode = "single"
+# 提高端侧比例：economy + 开启自适应（默认已开）
+default_profile = "economy"
+adaptive_routing_enabled = true
 ```
 
-### 7.5 自定义配置路径
+---
 
-```bash
-flowy --config /path/to/config.toml gateway start
-```
+## 7. 路由与学习
 
-CLI 与 Gateway 守护进程使用**同一份**配置文件（同一 `flowy` 二进制）。
+### 7.1 步态（step_kind）
+
+Router 从 `messages[]` 尾部推断当前 **Inference Step** 类型，例如：
+
+| step_kind | 典型路由倾向 |
+|-----------|--------------|
+| `HEARTBEAT_ACK` | 端侧 |
+| `TOOL_RESULT_DIGEST` | 端侧 / Cascade |
+| `TOOL_SELECT` / `TOOL_ARG_FILL` | 端侧或抽样校验 |
+| `INITIAL_PLAN` | **云端**（硬规则） |
+| `RECOVERY_AFTER_FAILURE` | **云端** + sticky |
+| `SUBAGENT_SPAWN` | **云端** |
+
+OpenClaw 特征：心跳 `[OpenClaw heartbeat poll]`、`assistant turn failed`、Inbound Meta、`exec` 等 Tier-1 工具触发硬约束。
+
+### 7.2 硬约束（Hard Gates）
+
+命中任一则跳过评分，直接定路由：
+
+| 规则 | 条件 |
+|------|------|
+| `GATE_CTX_OVERFLOW` | 输入 token > 80% × `ctx_edge_max_tokens` |
+| `GATE_ASSISTANT_FAILURE` | 最近 assistant 含失败标记 |
+| `GATE_RISKY_TOOL` | Tier-1 工具（exec/write/browser/spawn 等） |
+| `GATE_STICKY_CLOUD` | 会话 `cloud_sticky_until` 未过期 |
+| `GATE_EDGE_BUSY` | 端侧已有推理进行中（且云端可用）→ 直走云 |
+| InitialPlan / 复杂多模态 | 强制云端 |
+
+### 7.3 三层动态优化
+
+| 层级 | 数据源 | 作用 | 持久化 |
+|------|--------|------|--------|
+| **静态配置** | `config.toml` | profile、校验率基线 | 是 |
+| **经验学习** | 每次请求 outcome | 按 `step_kind` 调整难度偏置；足够样本后标记 `edge_trusted` | `experience.json` |
+| **自适应路由** | experience + stats | 运行时微调 `work_verify_sample_rate`、`θ_edge`/`θ_cloud` | **否**（仅内存） |
+
+**自适应路由**（`adaptive_routing_enabled = true`）逻辑摘要：
+
+- **预热**：云验证样本 < `adaptive_min_verified_samples` 时保持配置基线
+- **健康**（回退率 ≤ 目标、信任步态足够）：降低校验抽样率、略放宽 `θ_edge` → 提高端侧使用率
+- ** struggling**（回退率偏高）：提高校验率、收紧阈值 → 保证复杂任务正确率
+- **级联统计**：`stats.json` 中级联回退率 > 28% 时进一步收紧
+- 每约 **30 秒** 或 **40 个请求** 刷新；`flowy stats --lang zh` 可查看生效值与 `ADAPTIVE_*` 原因码
+
+**安全边界**：InitialPlan、复杂多模态、Hard Gates、高难度走云/级联 — **不会被自适应放宽**。
+
+### 7.4 Work 步态云端校验
+
+`TOOL_SELECT` 等 work 步态在 `edge_trusted` 前或抽样命中时，可走 **edge 生成 + cloud 验证**（Cascade）。`work_verify_sample_rate` 控制抽样比例；自适应层可在 `[floor, ceiling]` 内动态调整。
+
+### 7.5 级联（Cascade）
+
+1. 端侧完整生成
+2. Quality Gate（JSON 校验、tool 名白名单、文本相似度等）
+3. 不通过 → 升云并重答
+4. 通过 → 该步零云端计费
+
+端侧命中一步 ≈ 节省该步全部云端输入 Token（OpenClaw 场景约 **~52k token/步**）。
+
+### 7.6 成本模型（设计约束）
+
+单步云端成本近似 \(c_{in}^{cloud} \cdot T_{in}\)（输出占比 <1% 可忽略）。10 步 loop 全云端约 **528k 输入 token**；7 步改端侧可降至 **~158k（↓70%）**。
 
 ---
 
 ## 8. 常见问题
 
-**`flowy` not found**
+**`flowy` not found** — `cargo build --release` 或将 `target/release` 加入 PATH。
 
-- 先 `cargo build --release`，或将 `target/release` 加入 PATH。
+**`gateway did not become healthy within 30s`** — 检查端口占用；查看 `~/.flowy-router/logs/gateway.log`；确认 `listen` 与 `cli.gateway_url` 一致。
 
-**`gateway did not become healthy within 30s`**
+**Agent 无真实回复** — 确认上游 `base_url` 可达；未配置任何上游时返回 503。
 
-- 检查端口是否被占用；`flowy gateway run` 前台看日志。
-- 确认 `gateway.listen` 与 `cli.gateway_url` 一致。
+**停止无效** — `flowy gateway stop --force`
 
-**Agent 报错或没有真实模型回复**
-
-- 确认 `[upstream.edge]` / `[upstream.cloud]` 已配置且上游服务可达。
-- 未配置任何上游时聊天接口返回 503，请至少填写 `[upstream.edge]` 或 `[upstream.cloud]` 的 `base_url`。
-
-**需要停止但 `flowy gateway stop` 无效**
-
-```bash
-flowy gateway stop --force
-```
+**stats 里「已持久化 false」** — 表示当前查看的是 **会话（session）** 范围，非「未写入磁盘」；`--global` 查看跨重启累计。
 
 ---
 
 ## 9. 开发与测试
 
 ```bash
-# 单元 / 集成测试
-cargo test
-
-# 只测路由
-cargo test routing
+make test          # 或 cargo test
+cargo test routing # 只测路由
+make check
 ```
 
-项目结构：
-
 ```
-example/      # 配置文件示例（见 example/README.md）
+example/      # 配置示例（见 example/README.md）
 src/
-  config/     # ~/.flowy-router 路径 + config.toml 读写
-  gateway/    # 守护进程（路由、API、上游转发）
-  main.rs     # CLI + 隐藏 __serve 子命令（daemon 入口）
+  config/     # 路径 + config.toml
+  gateway/    # 守护进程（路由、API、上游、stats、experience）
+  stats_cmd.rs
+  main.rs     # CLI + __serve
 tests/        # CLI 集成测试
+Makefile      # 常用 dev/ops 目标
 ```
+
+---
+
+## 10. 路线图
+
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| MVP | OpenAI Gateway、Profile、Single/Cascade、OpenClaw 步态、Hard Gates | ✅ |
+| 可观测 | `stats.json`、`flowy stats`、Token 分解、TTFT/TPS、Cloud Input Saved | ✅ |
+| 经验学习 | `experience.json`、按 step_kind 偏置与 `edge_trusted` | ✅ |
+| 自适应路由 | 运行时微调校验率与 θ（experience + stats） | ✅ |
+| 增强 | 轻量难度分类器、Split 模式、流式 Cascade 早停、Bandit | 规划中 |
+| 企业 | SSO、审计、多租户预算熔断 | 规划中 |
+
+---
+
+## 11. 附录
+
+### OpenClaw system 分段标记（实现参考）
+
+```
+STATIC_END_MARKER = "# Dynamic Project Context"
+INBOUND_MARKER    = "## Inbound Context"
+RUNTIME_MARKER    = "## Runtime"
+HEARTBEAT_USER    = /^\[OpenClaw heartbeat poll\]/
+ASSISTANT_FAILED  = /\[assistant turn failed/
+```
+
+### 工具风险分级（摘要）
+
+| 层级 | 示例工具 | 策略 |
+|------|----------|------|
+| Tier-1 | `exec`、`write`、`browser`、`sessions_spawn` | 强制云 |
+| Tier-2 | `read`、`process`、`web_fetch` | Cascade |
+| Tier-3 | `memory_get`、`session_status` | 端侧优先 |
+
+### 指定其它配置文件
+
+```bash
+flowy --config /path/to/dev.toml gateway start
+flowy --config /path/to/dev.toml stats --lang zh
+```
+
+CLI 与 Gateway 守护进程须使用 **同一份** `config.toml`。
+
+---
+
+**文档维护**：产品与实现变更请同步更新本 README。

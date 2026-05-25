@@ -9,30 +9,44 @@ use serde::Serialize;
 
 use crate::gateway::api::admin;
 use crate::gateway::api::chat::chat_completions;
+use crate::gateway::api::setup;
+use crate::gateway::config_manager::ConfigManager;
 use crate::gateway::server::GatewayRuntime;
-use crate::gateway::config::AppConfig;
+use crate::gateway::edge_load::EdgeInferenceTracker;
 use crate::gateway::experience::ExperienceStore;
 use crate::gateway::multimodal::MultimodalStore;
+use crate::gateway::routing::AdaptiveTuner;
 use crate::gateway::session::SessionStore;
 use crate::gateway::stats::GatewayStats;
 use crate::gateway::upstream::UpstreamClient;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub config: AppConfig,
+    pub config_mgr: Arc<ConfigManager>,
     pub sessions: Arc<SessionStore>,
     pub experience: Arc<ExperienceStore>,
     pub multimodal: Arc<MultimodalStore>,
     pub upstream: UpstreamClient,
     pub runtime: Arc<GatewayRuntime>,
     pub stats: Arc<GatewayStats>,
+    pub adaptive_tuner: Arc<AdaptiveTuner>,
+    pub edge_load: Arc<EdgeInferenceTracker>,
+}
+
+impl AppState {
+    pub fn config(&self) -> crate::gateway::config::AppConfig {
+        self.config_mgr.get()
+    }
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/setup", get(setup::setup_page))
         .route("/v1/admin/status", get(admin::status))
         .route("/v1/admin/stats", get(admin::stats))
+        .route("/v1/admin/setup", get(setup::setup_get).post(setup::setup_post))
+        .route("/v1/admin/setup/init", post(setup::setup_init))
         .route("/v1/admin/shutdown", post(admin::shutdown))
         .route("/v1/chat/completions", post(chat_completions_handler))
         .with_state(state)
@@ -46,10 +60,11 @@ struct HealthResponse {
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    let config = state.config();
     Json(HealthResponse {
         status: "ok",
-        edge_configured: state.config.edge_base_url.is_some(),
-        cloud_configured: state.config.cloud_base_url.is_some(),
+        edge_configured: config.edge_base_url.is_some(),
+        cloud_configured: config.cloud_base_url.is_some(),
     })
 }
 

@@ -1,3 +1,6 @@
+mod edge_busy;
+mod adaptive;
+mod adaptive_tuner;
 mod conversation;
 mod decision;
 mod difficulty;
@@ -8,6 +11,8 @@ mod step_kind;
 mod upstream_availability;
 mod work;
 
+pub use adaptive::{EffectiveRouting, compute_effective_routing};
+pub use adaptive_tuner::AdaptiveTuner;
 pub use conversation::conversation_key;
 
 #[cfg(test)]

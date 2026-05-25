@@ -21,22 +21,29 @@ pub async fn chat_completions(
     let stream = req.stream;
     state.stats.record_request(stream);
 
-    if let Err(e) = require_gateway_api_key(&headers, &state.config.api_key) {
+    if let Err(e) = require_gateway_api_key(&headers, &state.config().api_key) {
         state.stats.record_error(&e);
         return Err(e);
     }
 
-    if let Err(e) = crate::gateway::routing::require_any_upstream(&state.config) {
+    if let Err(e) = crate::gateway::routing::require_any_upstream(&state.config()) {
         state.stats.record_error(&e);
         return Err(e);
     }
 
+    let routing = state.adaptive_tuner.refresh(
+        &state.config(),
+        state.experience.as_ref(),
+        state.stats.as_ref(),
+    );
     let decision = crate::gateway::routing::decide(
-        &state.config,
+        &state.config(),
         &req,
         state.sessions.as_ref(),
         Some(state.experience.as_ref()),
         Some(state.multimodal.as_ref()),
+        &routing,
+        Some(state.edge_load.as_ref()),
     );
     state.stats.record_decision(&decision);
 
@@ -117,7 +124,7 @@ fn record_learning(
         conv_key,
         decision,
         outcome,
-        state.config.cloud_sticky_ttl_secs,
+        state.config().cloud_sticky_ttl_secs,
         assistant_failed_signal,
     );
 }
