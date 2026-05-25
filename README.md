@@ -1,16 +1,18 @@
 # Flowy Router
 
-端云 LLM 智能路由：**Gateway 守护进程**承载路由与转发，**CLI** 负责启停与调试。Agent（OpenClaw、Hermes 等）将 OpenAI 兼容 `base_url` 指向 Gateway 即可。
+端云 LLM 智能路由：**单一 `flowy` 可执行文件** — CLI 管理命令与 Gateway 守护进程合并在同一二进制中。Agent（OpenClaw、Hermes 等）将 OpenAI 兼容 `base_url` 指向 Gateway 即可。
 
 产品说明见 [prd.md](./prd.md)。
 
 ## 架构
 
 ```
-┌─────────────┐     HTTP      ┌──────────────────────────────────┐
-│  flowy CLI  │ ────────────► │  flowy-gateway (daemon)         │
-└─────────────┘               └───────────────┬──────────────────┘
-                                              │
+┌─────────────────────────────────────────────────────────────┐
+│  flowy（单一二进制）                                          │
+│    flowy gateway start  →  后台 re-exec 自身为 HTTP 守护进程   │
+│    flowy env / stats / gateway status  →  CLI 管理           │
+└───────────────────────────────┬─────────────────────────────┘
+                                │
                     OpenClaw / Hermes ────────┘
                     POST /v1/chat/completions
 ```
@@ -31,8 +33,7 @@ cargo build --release
 
 | 二进制 | 路径 |
 |--------|------|
-| CLI | `target/release/flowy` |
-| Gateway | `target/release/flowy-gateway` |
+| flowy | `target/release/flowy` |
 
 **加入 PATH（推荐）**
 
@@ -41,21 +42,20 @@ cargo build --release
 export PATH="$PWD/target/release:$PATH"
 
 # 或复制到已有目录
-cp target/release/flowy target/release/flowy-gateway ~/.local/bin/
+cp target/release/flowy ~/.local/bin/
 ```
 
 **Windows（PowerShell）**
 
 ```powershell
 $env:Path += ";$PWD\target\release"
-# 或在 config.toml 中设置 cli.gateway_bin（见下文）
 ```
 
 未安装到 PATH 时，可用 `cargo run`（开发调试）：
 
 ```bash
-cargo run -p flowy-cli -- gateway start
-cargo run -p flowy-gateway -- --foreground
+cargo run -- gateway start
+cargo run -- gateway run
 ```
 
 ---
@@ -99,7 +99,7 @@ flowy --config example/config.toml gateway start
 
 首次 `flowy gateway start` 时若 `config.toml` 不存在，会自动写入默认模板（同 `example/config.minimal.toml` 结构）。
 
-日志级别（仅此一项可用环境变量）：`RUST_LOG=flowy_gateway=debug flowy gateway run`
+日志级别（仅此一项可用环境变量）：`RUST_LOG=flowy_router=debug flowy gateway run`
 
 ---
 
@@ -152,7 +152,7 @@ Flowy Gateway
 
 ```bash
 flowy gateway run
-# 等价于: flowy-gateway --config ~/.flowy-router/config.toml --foreground
+# 等价于: flowy --config ~/.flowy-router/config.toml __serve --foreground
 ```
 
 **停止 / 重启**
@@ -239,13 +239,11 @@ Hermes/OpenClaw 无需也不应通过请求头影响路由。
 
 ## 4. 指定其它配置文件
 
-调试或多环境时，CLI 与 Gateway 必须使用 **同一份** `config.toml`：
+调试或多环境时，CLI 与 Gateway 守护进程必须使用 **同一份** `config.toml`（`flowy gateway start` 会以 re-exec 方式启动同一 `flowy` 二进制）：
 
 ```bash
 flowy --config /path/to/dev.toml gateway start
 flowy --config /path/to/dev.toml gateway status
-
-flowy-gateway --config /path/to/dev.toml --daemon
 ```
 
 ---
@@ -286,7 +284,7 @@ Paths
   pid_file:       /home/you/.flowy-router/gateway.pid
   sessions_dir:   /home/you/.flowy-router/sessions
   gateway_pid:    12345
-  gateway_bin:    /home/you/flowy-router/target/release/flowy-gateway
+  gateway_bin:    /home/you/flowy-router/target/release/flowy
 
 Config (from config.toml or defaults if missing)
   gateway_listen:       127.0.0.1:8080
@@ -378,7 +376,6 @@ Runtime environment
 | 字段 | 说明 |
 |------|------|
 | `gateway_url` | CLI 访问 Gateway 的 URL，默认 `http://{gateway.listen}` |
-| `gateway_bin` | `flowy-gateway` 绝对路径；未设置时在同目录或 `PATH` 中查找 |
 
 ### 7.4 常用组合
 
@@ -403,18 +400,17 @@ route = "edge"
 
 ```bash
 flowy --config /path/to/config.toml gateway start
-flowy-gateway --config /path/to/config.toml --daemon
 ```
 
-CLI 与 Gateway 必须使用**同一份**文件。
+CLI 与 Gateway 守护进程使用**同一份**配置文件（同一 `flowy` 二进制）。
 
 ---
 
 ## 8. 常见问题
 
-**`flowy-gateway not found`**
+**`flowy` not found**
 
-- 先 `cargo build --release`，或在 `config.toml` 的 `[cli]` 中设置 `gateway_bin` 为绝对路径。
+- 先 `cargo build --release`，或将 `target/release` 加入 PATH。
 
 **`gateway did not become healthy within 30s`**
 
@@ -438,18 +434,19 @@ flowy gateway stop --force
 
 ```bash
 # 单元 / 集成测试
-cargo test --workspace
+cargo test
 
 # 只测路由
-cargo test -p flowy-gateway
+cargo test routing
 ```
 
 项目结构：
 
 ```
 example/      # 配置文件示例（见 example/README.md）
-crates/
+src/
   config/     # ~/.flowy-router 路径 + config.toml 读写
   gateway/    # 守护进程（路由、API、上游转发）
-  cli/        # 管理 CLI
+  main.rs     # CLI + 隐藏 __serve 子命令（daemon 入口）
+tests/        # CLI 集成测试
 ```

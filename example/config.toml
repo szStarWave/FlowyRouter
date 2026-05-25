@@ -46,6 +46,9 @@ ctx_edge_max_tokens = 65536
 # cloud_sticky_ttl_secs = 600
 # session_persist_enabled = true
 
+# work 步态（ToolSelect 等）云端校验抽样比例：0=不校验直接走端，1=每次都校验，默认 0.1
+# work_verify_sample_rate = 0.1
+
 # ---------------------------------------------------------------------------
 # 上游模型（OpenAI 兼容 Chat Completions）
 # ---------------------------------------------------------------------------
@@ -60,12 +63,8 @@ base_url = "https://api.deepseek.com/v1"
 # api_key = "sk-your-deepseek-api-key"   # 上游需要鉴权时填写（DeepSeek 等）
 
 # ---------------------------------------------------------------------------
-# CLI：管理命令如何找到 Gateway 与 flowy-gateway 二进制
+# CLI：管理命令访问 Gateway 的 HTTP 地址
 # ---------------------------------------------------------------------------
 [cli]
 # 默认同 http://{gateway.listen}，CLI 与 Gateway 不在同一机器时修改
 # gateway_url = "http://127.0.0.1:8080"
-
-# flowy gateway start 找不到二进制时设为绝对路径
-# gateway_bin = "/home/you/flowy-router/target/release/flowy-gateway"
-# Windows: gateway_bin = "C:\\path\\to\\flowy-gateway.exe"

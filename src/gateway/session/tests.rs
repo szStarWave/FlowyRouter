@@ -1,0 +1,54 @@
+#[cfg(test)]
+mod tests {
+    use super::super::data;
+    use super::super::store::SessionStore;
+    use crate::gateway::experience::RequestOutcome;
+    use crate::gateway::multimodal::MultimodalStrategy;
+    use crate::gateway::routing::{RouteDecision, RouteTier, RoutingMode, StepKind, WorkStrategy};
+    use crate::gateway::routing::Profile;
+
+    fn sample_decision() -> RouteDecision {
+        RouteDecision {
+            route: RouteTier::Cascade,
+            profile: Profile::Balanced,
+            mode: RoutingMode::Cascade,
+            step_kind: StepKind::InitialPlan,
+            difficulty: 0.6,
+            reason_codes: vec![],
+            tokens_in_estimate: 500,
+            tokens_out_estimate: 50,
+            cloud_input_saved_estimate: 0,
+            conversation_key: "conv:sticky_test".into(),
+            assistant_failed_recent: false,
+            multimodal_strategy: MultimodalStrategy::None,
+            work_strategy: WorkStrategy::None,
+        }
+    }
+
+    #[test]
+    fn sticky_persists_to_disk() {
+        let dir = std::env::temp_dir().join(format!(
+            "flowy-session-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = "conv:sticky_test";
+        {
+            let store = SessionStore::open(dir.clone(), true).unwrap();
+            let d = sample_decision();
+            store.apply_outcome(
+                key,
+                &d,
+                RequestOutcome::success(&d, true),
+                600,
+                false,
+            );
+            store.flush().unwrap();
+            assert!(store.cloud_sticky_until(key).is_some());
+        }
+        let path = dir.join("conv_sticky_test.json");
+        let loaded = data::load(&path).unwrap();
+        assert!(loaded.cloud_sticky_until_unix.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
