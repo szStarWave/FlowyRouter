@@ -104,6 +104,31 @@ cp target/release/flowy ~/.local/bin/
 
 **Windows（PowerShell）**：`$env:Path += ";$PWD\target\release"`
 
+### Electron / 动态库
+
+可将 Gateway **嵌入 Electron 主进程**（无需单独启动 CLI 守护进程）：
+
+```bash
+make release-dylib
+# Windows: target/release/flowy_router.dll
+# macOS:   target/release/libflowy_router.dylib
+# Linux:   target/release/libflowy_router.so
+```
+
+C 头文件：`ffi/flowy_router.h`。Node/Electron 可通过 [koffi](https://github.com/Koromix/koffi) 等加载 DLL 并调用：
+
+| 函数 | 说明 |
+|------|------|
+| `flowy_router_start(config_path, err, err_len)` | 后台启动 Gateway；`config_path` 可为 `NULL`（默认 `~/.flowy-router/config.toml`） |
+| `flowy_router_stop(err, err_len)` | 停止并等待线程退出 |
+| `flowy_router_is_running()` | 是否运行中 |
+| `flowy_router_gateway_url(buf, len)` | 写入 `http://host:port` |
+| `flowy_router_version()` | 库版本 |
+
+最小示例见 `example/electron/`（`npm install && node main.mjs [config.toml]`）。
+
+---
+
 开发调试可用 `cargo run -- gateway start` 或 `make start`：
 
 ```bash

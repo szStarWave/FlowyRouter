@@ -1,19 +1,15 @@
-mod cli_settings;
-mod client;
-mod config;
-mod daemon_ctl;
-mod env_cmd;
-mod gateway;
-mod setup_cmd;
-mod stats_cmd;
-
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use cli_settings::CliSettings;
-use config::{ensure_initialized, load_from_path};
-use gateway::{init_logging, AppConfig};
+use flowy_router::cli_settings::CliSettings;
+use flowy_router::client;
+use flowy_router::config::{self, ensure_initialized, load_from_path};
+use flowy_router::daemon_ctl;
+use flowy_router::env_cmd;
+use flowy_router::gateway::{self, init_logging, AppConfig};
+use flowy_router::setup_cmd;
+use flowy_router::stats_cmd;
 use tracing::info;
 
 /// CLI for Flowy Router — gateway daemon and management commands.

@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 
 use axum::Router;
@@ -41,13 +42,45 @@ impl GatewayRuntime {
     }
 }
 
+#[derive(Debug)]
+pub struct RunOptions {
+    pub register_pid: bool,
+    pub listen_for_ctrl_c: bool,
+    pub cancel: CancellationToken,
+    pub ready: Option<SyncSender<()>>,
+}
+
+impl RunOptions {
+    pub fn daemon(register_pid: bool) -> Self {
+        Self {
+            register_pid,
+            listen_for_ctrl_c: true,
+            cancel: CancellationToken::new(),
+            ready: None,
+        }
+    }
+
+    pub fn embedded(cancel: CancellationToken, ready: SyncSender<()>) -> Self {
+        Self {
+            register_pid: false,
+            listen_for_ctrl_c: false,
+            cancel,
+            ready: Some(ready),
+        }
+    }
+}
+
 pub async fn run(config: AppConfig, register_pid: bool) -> anyhow::Result<()> {
-    if register_pid {
+    run_with_options(config, RunOptions::daemon(register_pid)).await
+}
+
+pub async fn run_with_options(config: AppConfig, opts: RunOptions) -> anyhow::Result<()> {
+    if opts.register_pid {
         daemon::ensure_data_dir(&config)?;
         daemon::write_pid_file(&config)?;
     }
 
-    let cancel = CancellationToken::new();
+    let cancel = opts.cancel.clone();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let runtime = Arc::new(GatewayRuntime {
@@ -105,6 +138,10 @@ pub async fn run(config: AppConfig, register_pid: bool) -> anyhow::Result<()> {
     let addr: SocketAddr = config.listen_addr.parse()?;
     let listener = TcpListener::bind(addr).await?;
 
+    if let Some(ready) = opts.ready {
+        let _ = ready.send(());
+    }
+
     info!(%addr, "flowy gateway listening");
     info!(
         edge = config.edge_base_url.is_some(),
@@ -130,13 +167,15 @@ pub async fn run(config: AppConfig, register_pid: bool) -> anyhow::Result<()> {
         cancel_shutdown.cancel();
     });
 
-    let ctrl_c = cancel.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            info!("ctrl-c received, shutting down");
-            ctrl_c.cancel();
-        }
-    });
+    if opts.listen_for_ctrl_c {
+        let ctrl_c = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                info!("ctrl-c received, shutting down");
+                ctrl_c.cancel();
+            }
+        });
+    }
 
     serve.await?;
 
@@ -153,7 +192,7 @@ pub async fn run(config: AppConfig, register_pid: bool) -> anyhow::Result<()> {
         tracing::warn!(error = %e, "final session flush failed");
     }
 
-    if register_pid {
+    if opts.register_pid {
         daemon::remove_pid_file(&config);
     }
 
