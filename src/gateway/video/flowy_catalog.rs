@@ -192,15 +192,31 @@ pub async fn cancel(
             job.id, job.status
         )));
     }
-    // Flowy rejects DELETE while still generating (HTTP 409).
+
+    // Prefer live Flowy status: queued can still be DELETE'd; running cannot
+    // (HTTP 409 `error.video_task.delete_running`). Soft-cancel locally for
+    // running jobs so OpenAI-style `/cancel` still succeeds and the UI stops.
+    let live = match refresh(http, target, job).await {
+        Ok(j) => j,
+        Err(_) => job.clone(),
+    };
+    let live_status = live.status.to_ascii_lowercase();
+    if matches!(live_status.as_str(), "cancelled" | "canceled") {
+        return Ok(());
+    }
+    if matches!(live_status.as_str(), "completed" | "failed") {
+        return Err(AppError::BadRequest(format!(
+            "video `{}` is already terminal (status={})",
+            job.id, live.status
+        )));
+    }
     if matches!(
-        status.as_str(),
+        live_status.as_str(),
         "in_progress" | "running" | "processing" | "generating"
     ) {
-        return Err(AppError::BadRequest(
-            "flowy catalog cannot cancel a running video task".into(),
-        ));
+        return Ok(());
     }
+
     delete_upstream_task(http, target, job).await
 }
 

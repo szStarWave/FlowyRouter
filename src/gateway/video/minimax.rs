@@ -196,7 +196,8 @@ pub async fn refresh(
     Ok(apply_query_to_job(job, &v, base))
 }
 
-/// Cancel a queued MiniMax task. Upstream cannot cancel `running`.
+/// Cancel a queued MiniMax task. Upstream cannot cancel `running`; soft-cancel
+/// locally so OpenAI-style `/cancel` still succeeds.
 pub async fn cancel(
     http: &Client,
     target: &ResolvedVideoUpstream,
@@ -216,9 +217,7 @@ pub async fn cancel(
         status.as_str(),
         "in_progress" | "running" | "processing" | "generating"
     ) {
-        return Err(AppError::BadRequest(
-            "minimax cannot cancel a running video task".into(),
-        ));
+        return Ok(());
     }
     delete_upstream_task(http, target, job).await
 }
