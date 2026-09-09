@@ -26,7 +26,7 @@ use self::types::{ImageRef, VideoCreateRequest, VideoJob, VideoListResponse, Vid
 
 pub use tier::{resolve_video_tier, VideoTier};
 
-const VIDEO_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
+const VIDEO_HTTP_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Clone)]
 pub struct VideoClient {

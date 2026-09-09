@@ -54,16 +54,13 @@ pub async fn create(
     let model = normalize_flowy_model(&raw_model);
     let duration = seconds_to_u32(req.seconds.as_deref()).clamp(4, 15);
 
-    let has_first = req.input_reference.is_some();
-    let has_last = req.last_frame.is_some();
-    let refs: Vec<&ImageRef> = req.reference_images.iter().take(MAX_REFERENCE_IMAGES).collect();
-    let has_reference = !refs.is_empty();
-    if (has_first || has_last) && has_reference {
+    let (first, last, refs) = assign_catalog_frames(req);
+    if (first.is_some() || last.is_some()) && !refs.is_empty() {
         return Err(AppError::BadRequest(
             "first/last frame cannot be mixed with reference media".into(),
         ));
     }
-    let has_media = has_first || has_last || has_reference;
+    let has_media = first.is_some() || last.is_some() || !refs.is_empty();
     let seedance = is_seedance_model(&raw_model);
     let resolution = if seedance {
         normalize_seedance_resolution(req.resolution.as_deref(), req.size.as_deref())
@@ -81,7 +78,7 @@ pub async fn create(
         "text": req.prompt,
     })];
 
-    if let Some(reference) = &req.input_reference {
+    if let Some(reference) = first {
         let url = image_ref_to_url(http, reference).await?;
         content.push(json!({
             "type": "image_url",
@@ -89,8 +86,8 @@ pub async fn create(
             "image_url": { "url": url },
         }));
     }
-    if let Some(last) = &req.last_frame {
-        let url = image_ref_to_url(http, last).await?;
+    if let Some(frame) = last {
+        let url = image_ref_to_url(http, frame).await?;
         content.push(json!({
             "type": "image_url",
             "role": "last_frame",
@@ -272,6 +269,7 @@ async fn send_json(
     builder = builder
         .header("Accept", "application/json")
         .header("User-Agent", USER_AGENT);
+    let body_len = body.as_ref().map(|bytes| bytes.len());
     if let Some(bytes) = body {
         builder = builder
             .header("Content-Type", "application/json")
@@ -280,10 +278,12 @@ async fn send_json(
     if let Some(key) = api_key {
         builder = builder.bearer_auth(key).header("token", key);
     }
-    let resp = builder
-        .send()
-        .await
-        .map_err(|e| AppError::Upstream(format!("flowy catalog {method}: {e}")))?;
+    let resp = builder.send().await.map_err(|e| {
+        let hint = body_len
+            .map(|n| format!(" body_bytes={n}"))
+            .unwrap_or_default();
+        AppError::Upstream(format!("flowy catalog {method}: {e}{hint}"))
+    })?;
     let status = resp.status();
     let text = resp
         .text()
@@ -319,6 +319,23 @@ fn parse_business_json(text: &str, op: &str) -> AppResult<Value> {
         )));
     }
     Ok(v)
+}
+
+/// A single reference still without first/last frame is I2V (`first_frame`).
+fn assign_catalog_frames(
+    req: &VideoCreateRequest,
+) -> (Option<&ImageRef>, Option<&ImageRef>, Vec<&ImageRef>) {
+    let first = req.input_reference.as_ref();
+    let last = req.last_frame.as_ref();
+    let refs: Vec<&ImageRef> = req
+        .reference_images
+        .iter()
+        .take(MAX_REFERENCE_IMAGES)
+        .collect();
+    if first.is_none() && last.is_none() && refs.len() == 1 {
+        return (Some(refs[0]), None, Vec::new());
+    }
+    (first, last, refs)
 }
 
 fn extract_local_task_id(v: &Value) -> Option<String> {
@@ -487,6 +504,45 @@ mod tests {
         );
         assert!(!url.contains("/claw/v1/videos"));
         assert!(!url.contains("/v2/video_generation"));
+    }
+
+    fn sample_create(
+        first: Option<&str>,
+        last: Option<&str>,
+        refs: &[&str],
+    ) -> VideoCreateRequest {
+        VideoCreateRequest {
+            prompt: "move".into(),
+            model: Some("AIPC-Doubao-Seedance-2.0".into()),
+            seconds: Some("4".into()),
+            size: Some("1280x720".into()),
+            input_reference: first.map(|u| ImageRef::Url(u.into())),
+            resolution: Some("720p".into()),
+            last_frame: last.map(|u| ImageRef::Url(u.into())),
+            reference_images: refs.iter().map(|u| ImageRef::Url((*u).into())).collect(),
+            watermark: None,
+        }
+    }
+
+    #[test]
+    fn single_reference_still_becomes_first_frame() {
+        let req = sample_create(None, None, &["data:image/png;base64,aaa"]);
+        let (first, last, refs) = assign_catalog_frames(&req);
+        match first {
+            Some(ImageRef::Url(url)) => assert_eq!(url, "data:image/png;base64,aaa"),
+            other => panic!("first={other:?}"),
+        }
+        assert!(last.is_none());
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn two_reference_stills_stay_r2v() {
+        let req = sample_create(None, None, &["https://a/1.png", "https://a/2.png"]);
+        let (first, last, refs) = assign_catalog_frames(&req);
+        assert!(first.is_none());
+        assert!(last.is_none());
+        assert_eq!(refs.len(), 2);
     }
 
     #[test]
